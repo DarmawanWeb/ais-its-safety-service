@@ -40,7 +40,11 @@ export class ListEventsQuery extends IntersectionType(
   @IsIn(ALERT_SEVERITIES)
   readonly severity?: AlertSeverity;
 
-  @ApiPropertyOptional({ enum: SAFETY_EVENT_STATUSES })
+  @ApiPropertyOptional({
+    enum: SAFETY_EVENT_STATUSES,
+    description:
+      '`open` without `from`: every open occurrence, whenever it was raised (no default range)',
+  })
   @IsOptional()
   @IsIn(SAFETY_EVENT_STATUSES)
   readonly status?: SafetyEventStatus;

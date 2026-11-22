@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   RecordingEncounterSink,
+  RecordingSightings,
   RecordingStateSink,
+  TestGate,
   testMetrics,
 } from '../__testing__/fakes.js';
 import { CollisionDetector } from './collision.detector.js';
@@ -26,14 +28,18 @@ const underWay = { navstatus: 0, predictedNavstatus: 0 as const, hdg: 511 };
 function setup(env: Record<string, string> = {}) {
   const states = new RecordingStateSink();
   const encounters = new RecordingEncounterSink();
+  const gate = new TestGate();
+  const sightings = new RecordingSightings();
   const harness = DetectorTestHarness.create({
-    detectors: [new CollisionDetector(states, encounters, testMetrics())],
+    detectors: [
+      new CollisionDetector(states, encounters, testMetrics(), gate, sightings),
+    ],
     distanceModel: 'sphere',
     pairSearch: { cellSizeM: 3704, maxAgeMs: 600_000 },
     env,
     now: T0,
   });
-  return { harness, states, encounters };
+  return { harness, states, encounters, gate, sightings };
 }
 
 /**
@@ -220,6 +226,68 @@ describe('CollisionDetector', () => {
     ]);
     expect(states.last(A)?.collision?.collisionRisk).toBe('none');
     expect(states.last(B)?.collision?.collisionRisk).toBe('none');
+  });
+
+  it('resolves an open alert whose pair is not evaluated again within the window of event time, whatever the wall clock', async () => {
+    const { harness } = setup();
+    // The wall clock runs a day ahead of the AIS event time (a backlog).
+    harness.setTime(new Date(T0.getTime() + 86_400_000));
+    harness.services.alerts.restore([
+      {
+        alertId: '0195f3c4-0000-7000-8000-0000000000c1',
+        dedupKey: KEY,
+        type: 'collision',
+        mmsi: A,
+        relatedMmsi: B,
+        zoneId: null,
+        severity: 'warning',
+        publishedSeverity: 'warning',
+        openedAt: harness.now,
+        publishedAt: harness.now,
+        lastSeenAt: harness.now,
+        detector: 'collision',
+      },
+    ]);
+    const far = { sog: 8, cog: 0, ...underWay };
+    await harness.position({
+      mmsi: 525_000_099,
+      ...place(50, 50),
+      ...far,
+      time: after(0),
+    });
+    await harness.tick();
+    expect(harness.resolutions).toEqual([]);
+
+    await harness.position({
+      mmsi: 525_000_099,
+      ...place(50, 51),
+      ...far,
+      time: after(130),
+    });
+    await harness.tick();
+    expect(harness.resolutions).toEqual([
+      expect.objectContaining({ reason: 'pair no longer evaluated' }),
+    ]);
+  });
+
+  it('starts over after a takeover: new encounter, alert kept open without a new publication', async () => {
+    const { harness, encounters, gate, sightings } = setup();
+    await crossing(harness);
+    expect(harness.alertsOf('collision')).toHaveLength(1);
+    const before = encounters.samples.at(-1)?.encounterId;
+
+    gate.triggerResets();
+    await crossing(harness, 1);
+
+    expect(harness.alertsOf('collision')).toHaveLength(1);
+    expect(harness.alertsOf('collision')[0]?.data).not.toHaveProperty('orgIds');
+    const after = encounters.samples.at(-1)?.encounterId;
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+    expect(sightings.records.at(-1)).toMatchObject({
+      dedupKey: KEY,
+      outcome: 'unchanged',
+    });
   });
 
   it('describes its thresholds', () => {

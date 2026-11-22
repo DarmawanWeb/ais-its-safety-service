@@ -80,6 +80,25 @@ export function assessEws(
   };
 }
 
+/**
+ * `true` when a pipeline zone applies to a vessel (spec §8.5): global zones
+ * (`orgId: null`) apply to every vessel, an organization's own zones only to
+ * that organization's vessels. v2 rule on top of `ews.pipeline_distance_status`
+ * (legacy had one bundled pipeline): org-owned zones are tenant-private, so
+ * they never produce states or alerts about other organizations' vessels.
+ *
+ * @method ews.pipeline_distance_status
+ * @param zoneOrgId owner of the zone, `null` = global.
+ * @param vesselOrgId owner of the vessel (`FLEET` projection), `null` = unregistered.
+ * @see docs/PLATFORM_SPEC.md §8.5 (org-owned zones are tenant-private), §13.7
+ */
+export function pipelineAppliesTo(
+  zoneOrgId: string | null,
+  vesselOrgId: string | null,
+): boolean {
+  return zoneOrgId === null || zoneOrgId === vesselOrgId;
+}
+
 /** Alert key of an EWS condition (spec §13.7): `ews:<mmsi>:<zoneId>`. */
 export function ewsDedupKey(mmsi: number, zoneId: string): string {
   return `ews:${mmsi}:${zoneId}`;

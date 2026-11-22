@@ -321,7 +321,10 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
     }
     const subject = subjects.alert('collision', CROSS_A);
     expect(await count('ALERTS', subject)).toBe(2);
-    expect(await lastAlert(subject)).toMatchObject({
+    const critical = await lastAlert(subject);
+    // Owner organizations are not part of the payload (both parties read the event).
+    expect(critical.data).not.toHaveProperty('orgIds');
+    expect(critical).toMatchObject({
       type: 'collision',
       severity: 'critical',
       mmsi: CROSS_A,

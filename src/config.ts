@@ -5,6 +5,7 @@ import {
   ServiceNameSchema,
   SqlIdentifierSchema,
 } from '@darmawanweb/ais-its-nest';
+import { DEFAULT_PINNED_TTL_MS } from '@darmawanweb/ais-its-nest/nats';
 import * as z from 'zod';
 
 import { SERVICE } from './service.js';
@@ -33,6 +34,15 @@ export const configSchema = defineConfig({
   SAFETY_STATE_FLUSH_MS: envInteger(20, 10_000).default(250),
   /** Positions handled in parallel by the detectors (one vessel stays ordered). */
   DETECTOR_CONCURRENCY: envInteger(1, 64).default(8),
+  /**
+   * Pinned TTL of the exclusive position consumer, ms (kit default 30 s): a
+   * standby takes over when the active instance pulled nothing for this
+   * long; a gap of half of it without positions makes the instance reload
+   * its open alerts (`AlertStateSync`).
+   */
+  DETECTOR_PINNED_TTL_MS: envInteger(2_000, 300_000).default(
+    DEFAULT_PINNED_TTL_MS,
+  ),
   /** Minimum time between two publications of one alert key (AlertEmitter cooldown), s. */
   ALERT_COOLDOWN_S: envInteger(0, 86_400).default(600),
   /** How long startup waits for the GEO / FLEET snapshots, ms. */

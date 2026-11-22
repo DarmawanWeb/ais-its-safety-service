@@ -57,9 +57,12 @@ export interface EncounterRecord {
   readonly history: readonly EncounterHistorySample[];
 }
 
-/** Keyset position of the encounters list (latest sample first). */
+/**
+ * Keyset position of the encounters list: the last encounter id returned.
+ * Ids are UUIDv7 created when the encounter starts, so the order (newest
+ * encounter first) never changes while an encounter gets new samples.
+ */
 export interface EncounterPosition {
-  readonly lastSampleAt: Date;
   readonly encounterId: string;
 }
 

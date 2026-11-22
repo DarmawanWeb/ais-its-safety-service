@@ -34,6 +34,7 @@ const report = (
     ewsStatus,
     pipelineDistanceM: 800,
     nearestPipelineZoneId: null,
+    nearestPipelineOrgId: null,
     evaluatedAt: at(seconds),
   },
 });

@@ -69,7 +69,7 @@ export const vessels = serviceSchema.table(
   ],
 );
 
-/** Latest safety state per vessel (`0001_init.sql`). */
+/** Latest safety state per vessel (`0001_init.sql`, `0002_private_pipelines_open_events.sql`). */
 export const vesselState = serviceSchema.table(
   'vessel_state',
   {
@@ -84,6 +84,8 @@ export const vesselState = serviceSchema.table(
     ewsStatus: pg.smallint('ews_status').notNull().default(3),
     pipelineDistM: pg.doublePrecision('pipeline_dist_m'),
     nearestPipelineZoneId: pg.uuid('nearest_pipeline_zone_id'),
+    /** Owner of the nearest pipeline zone, `null` = global (`0002`). */
+    nearestPipelineOrgId: pg.uuid('nearest_pipeline_org_id'),
     ewsEvaluatedAt: timestamptz('ews_evaluated_at'),
     collisionRisk: pg
       .text('collision_risk')
@@ -135,6 +137,7 @@ export const events = serviceSchema.table(
     data: pg.jsonb('data').$type<Record<string, unknown>>().notNull(),
     status: pg.text('status').$type<SafetyEventStatus>().notNull(),
     openedAt: timestamptz('opened_at').notNull(),
+    /** Event time of the latest signal of the condition (raise, repeat, de-escalation). */
     lastSeenAt: timestamptz('last_seen_at').notNull(),
     resolvedAt: timestamptz('resolved_at'),
     resolution: pg.jsonb('resolution').$type<Record<string, unknown>>(),
@@ -146,6 +149,7 @@ export const events = serviceSchema.table(
     pg.index('events_time_idx').on(table.time),
     pg.index('events_time_id_idx').on(table.time, table.id),
     pg.index('events_mmsi_time_idx').on(table.mmsi, table.time),
+    pg.index('events_open_time_idx').on(table.time, table.id),
   ],
 );
 

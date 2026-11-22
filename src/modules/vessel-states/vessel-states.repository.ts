@@ -22,6 +22,7 @@ import * as z from 'zod';
 
 import * as schema from '../../db/schema.js';
 import {
+  hidePipeline,
   type SafetyStateReport,
   safetyStateMethodIds,
 } from '../../domain/safety-state.js';
@@ -31,7 +32,10 @@ const { vesselState, vessels } = schema;
 
 /** A merged state as stored, with its last publication (result of {@link VesselStatesRepository.upsertReports}). */
 export interface StoredSafetyState {
-  /** The state as `safety.vessel_state.updated.v1` carries it. */
+  /**
+   * The state as `safety.vessel_state.updated.v1` carries it: shared with
+   * every tenant, so the zone and distance of an org-owned pipeline are `null`.
+   */
   readonly state: SafetyVesselStateV1;
   /** The last published state, `null` when none was (or it no longer parses). */
   readonly published: SafetyVesselStateV1 | null;
@@ -44,6 +48,7 @@ const ReturnedRowSchema = z.object({
   ews_status: EwsStatusSchema,
   pipeline_dist_m: z.number().nullable(),
   nearest_pipeline_zone_id: z.string().nullable(),
+  nearest_pipeline_org_id: z.string().nullable(),
   ews_evaluated_at: z.date().nullable(),
   collision_risk: CollisionRiskSchema,
   closest_encounter: ClosestEncounterSchema.nullable(),
@@ -70,11 +75,11 @@ const pick = (column: string, condition: string): string =>
 const UPSERT_REPORTS_SQL = `
 INSERT INTO vessel_state AS s (
   mmsi, time, geom, sog, cog, hdg, navstatus, pred_navstatus,
-  ews_status, pipeline_dist_m, nearest_pipeline_zone_id, ews_evaluated_at,
+  ews_status, pipeline_dist_m, nearest_pipeline_zone_id, nearest_pipeline_org_id, ews_evaluated_at,
   collision_risk, closest_encounter, collision_evaluated_at, evaluated_at)
 SELECT r.mmsi, r.time, ST_SetSRID(ST_MakePoint(r.lon, r.lat), 4326)::geography,
   r.sog, r.cog, r.hdg, r.navstatus, r.pred_navstatus,
-  COALESCE(r.ews_status, 3), r.pipeline_dist_m, r.zone_id, r.ews_at,
+  COALESCE(r.ews_status, 3), r.pipeline_dist_m, r.zone_id, r.zone_org_id, r.ews_at,
   COALESCE(r.collision_risk, 'none'),
   CASE WHEN r.other_mmsi IS NULL THEN NULL
        ELSE jsonb_build_object('otherMmsi', r.other_mmsi, 'cpaNm', r.cpa_nm, 'tcpaMin', r.tcpa_min) END,
@@ -83,21 +88,21 @@ SELECT r.mmsi, r.time, ST_SetSRID(ST_MakePoint(r.lon, r.lat), 4326)::geography,
 FROM unnest($1::integer[], $2::timestamptz[], $3::float8[], $4::float8[], $5::float8[],
             $6::float8[], $7::float8[], $8::smallint[], $9::smallint[], $10::smallint[],
             $11::float8[], $12::uuid[], $13::timestamptz[], $14::text[], $15::integer[],
-            $16::float8[], $17::float8[], $18::timestamptz[])
+            $16::float8[], $17::float8[], $18::timestamptz[], $19::uuid[])
   AS r(mmsi, time, lon, lat, sog, cog, hdg, navstatus, pred_navstatus, ews_status,
        pipeline_dist_m, zone_id, ews_at, collision_risk, other_mmsi,
-       cpa_nm, tcpa_min, collision_at)
+       cpa_nm, tcpa_min, collision_at, zone_org_id)
 ON CONFLICT (mmsi) DO UPDATE SET
   time = GREATEST(s.time, EXCLUDED.time),
   ${['geom', 'sog', 'cog', 'hdg', 'navstatus', 'pred_navstatus'].map((column) => pick(column, newerPosition)).join(',\n  ')},
-  ${['ews_status', 'pipeline_dist_m', 'nearest_pipeline_zone_id'].map((column) => pick(column, newerPart('ews'))).join(',\n  ')},
+  ${['ews_status', 'pipeline_dist_m', 'nearest_pipeline_zone_id', 'nearest_pipeline_org_id'].map((column) => pick(column, newerPart('ews'))).join(',\n  ')},
   ews_evaluated_at = GREATEST(s.ews_evaluated_at, EXCLUDED.ews_evaluated_at),
   ${['collision_risk', 'closest_encounter'].map((column) => pick(column, newerPart('collision'))).join(',\n  ')},
   collision_evaluated_at = GREATEST(s.collision_evaluated_at, EXCLUDED.collision_evaluated_at),
   evaluated_at = GREATEST(s.evaluated_at, EXCLUDED.evaluated_at),
   updated_at = now()
 RETURNING s.mmsi, s.evaluated_at, s.ews_status, s.pipeline_dist_m, s.nearest_pipeline_zone_id,
-  s.ews_evaluated_at, s.collision_risk, s.closest_encounter, s.collision_evaluated_at,
+  s.nearest_pipeline_org_id, s.ews_evaluated_at, s.collision_risk, s.closest_encounter, s.collision_evaluated_at,
   s.published_state`;
 
 /** Records the last published state of each vessel (never moves it back in time). */
@@ -144,26 +149,30 @@ export class VesselStatesRepository {
       column((r) => r.collision?.closestEncounter?.cpaNm ?? null),
       column((r) => r.collision?.closestEncounter?.tcpaMin ?? null),
       column((r) => r.collision?.evaluatedAt ?? null),
+      column((r) => r.ews?.nearestPipelineOrgId ?? null),
     ]);
     return result.rows.map((raw) => {
       const row = ReturnedRowSchema.parse(raw);
       const published = SafetyVesselStateV1Schema.safeParse(
         row.published_state,
       );
+      const state: SafetyVesselStateV1 = {
+        mmsi: row.mmsi,
+        time: row.evaluated_at.toISOString(),
+        ewsStatus: row.ews_status,
+        pipelineDistanceM: row.pipeline_dist_m,
+        nearestPipelineZoneId: row.nearest_pipeline_zone_id,
+        collisionRisk: row.collision_risk,
+        closestEncounter: row.closest_encounter,
+        methodIds: safetyStateMethodIds({
+          ews: row.ews_evaluated_at !== null,
+          collision: row.collision_evaluated_at !== null,
+        }),
+      };
       return {
-        state: {
-          mmsi: row.mmsi,
-          time: row.evaluated_at.toISOString(),
-          ewsStatus: row.ews_status,
-          pipelineDistanceM: row.pipeline_dist_m,
-          nearestPipelineZoneId: row.nearest_pipeline_zone_id,
-          collisionRisk: row.collision_risk,
-          closestEncounter: row.closest_encounter,
-          methodIds: safetyStateMethodIds({
-            ews: row.ews_evaluated_at !== null,
-            collision: row.collision_evaluated_at !== null,
-          }),
-        },
+        // SAFETY is shared with every tenant: org-owned pipelines stay private (spec §8.5).
+        state:
+          row.nearest_pipeline_org_id === null ? state : hidePipeline(state),
         published: published.success ? published.data : null,
       };
     });
@@ -221,6 +230,7 @@ export class VesselStatesRepository {
         ewsStatus: vesselState.ewsStatus,
         pipelineDistM: vesselState.pipelineDistM,
         nearestPipelineZoneId: vesselState.nearestPipelineZoneId,
+        nearestPipelineOrgId: vesselState.nearestPipelineOrgId,
         ewsEvaluatedAt: vesselState.ewsEvaluatedAt,
         collisionRisk: vesselState.collisionRisk,
         closestEncounter: vesselState.closestEncounter,
@@ -260,6 +270,7 @@ function toRecord(row: SelectedState): VesselStateRecord {
     ewsStatus: EwsStatusSchema.parse(row.ewsStatus) satisfies EwsStatus,
     pipelineDistanceM: row.pipelineDistM,
     nearestPipelineZoneId: row.nearestPipelineZoneId,
+    nearestPipelineOrgId: row.nearestPipelineOrgId,
     collisionRisk: row.collisionRisk satisfies CollisionRisk,
     closestEncounter: row.closestEncounter,
     methodIds: safetyStateMethodIds({

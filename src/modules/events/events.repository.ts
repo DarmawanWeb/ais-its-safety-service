@@ -19,8 +19,10 @@ const { events } = schema;
 
 /** Filters of `GET /safety/events`. */
 export interface EventFilter {
-  readonly from: Date;
-  readonly to: Date;
+  /** Events at or after this time; `undefined` = no lower bound. */
+  readonly from?: Date | undefined;
+  /** Events before this time; `undefined` = no upper bound. */
+  readonly to?: Date | undefined;
   readonly detector?: string | undefined;
   readonly severity?: AlertSeverity | undefined;
   readonly status?: SafetyEventStatus | undefined;
@@ -49,8 +51,8 @@ export class EventsRepository {
     scope: SafetyReadScope,
   ): Promise<EventRecord[]> {
     const conditions: (SQL | undefined)[] = [
-      gte(events.time, filter.from),
-      lt(events.time, filter.to),
+      filter.from === undefined ? undefined : gte(events.time, filter.from),
+      filter.to === undefined ? undefined : lt(events.time, filter.to),
       scopeCondition(scope, [events.mmsi, events.relatedMmsi]),
     ];
     if (filter.detector !== undefined)

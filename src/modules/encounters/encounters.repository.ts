@@ -76,9 +76,9 @@ export class EncountersRepository {
 
   /**
    * Encounters with samples in the filter's range that `scope` may read,
-   * latest sample first (`limit` encounters), each with its samples in the
-   * range. Two statements: the encounters (grouped samples), then their
-   * history.
+   * newest encounter first (`encounter_id` DESC: UUIDv7 of the start, an
+   * immutable key), `limit` encounters, each with its samples in the range.
+   * Two statements: the encounters (grouped samples), then their history.
    */
   async list(
     filter: EncounterFilter,
@@ -101,13 +101,11 @@ export class EncountersRepository {
       );
     if (filter.encounterId !== undefined)
       conditions.push(eq(encounters.encounterId, filter.encounterId));
+    if (filter.after !== undefined)
+      conditions.push(lt(encounters.encounterId, filter.after.encounterId));
     const having: SQL[] = [];
     if (filter.peakRisks !== undefined)
       having.push(inArray(PEAK_RANK, filter.peakRisks.map(riskRank)));
-    if (filter.after !== undefined)
-      having.push(
-        sql`(${LAST_SAMPLE_AT}, ${encounters.encounterId}) < (${filter.after.lastSampleAt}, ${filter.after.encounterId})`,
-      );
 
     const groups = await this.db
       .select({
@@ -123,7 +121,7 @@ export class EncountersRepository {
       .where(and(...conditions))
       .groupBy(encounters.encounterId, encounters.mmsiA, encounters.mmsiB)
       .having(having.length === 0 ? undefined : and(...having))
-      .orderBy(desc(LAST_SAMPLE_AT), desc(encounters.encounterId))
+      .orderBy(desc(encounters.encounterId))
       .limit(filter.limit);
     if (groups.length === 0) return [];
 

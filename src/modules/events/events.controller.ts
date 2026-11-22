@@ -23,7 +23,7 @@ export class EventsController {
   @ApiOperation({
     summary: 'Safety events (EWS, collision) with their lifecycle',
     description:
-      'Newest first (default: the last 7 days, at most 366 days). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).',
+      'Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).',
   })
   @ApiCursorResponse(SafetyEventDto)
   async list(

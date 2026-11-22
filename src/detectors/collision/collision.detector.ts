@@ -31,6 +31,8 @@ import {
   SAFETY_STATE_SINK,
   type SafetyStateSink,
 } from '../../modules/vessel-states/safety-state.sink.js';
+import { ALERT_SIGHTINGS, type AlertSightingSink } from '../alert-sightings.js';
+import { DETECTOR_GATE, type DetectorGate } from '../alert-state-sync.js';
 import { COLLISION_ALERT_TYPE } from '../alert-types.js';
 import { kinematicsOf, vesselLabel } from '../vessel-kinematics.js';
 import {
@@ -124,7 +126,9 @@ function riskOfSeverity(
  *
  * Positions of one vessel are handled in order, different vessels
  * concurrently: every decision reads the tracker state at the time it is
- * made, and alert operations of one key are serialized by the emitter.
+ * made, and alert operations of one key are serialized by the emitter. The
+ * tracker starts over when another instance was active meanwhile
+ * (`AlertStateSync`), seeded by the open alerts like after a restart.
  *
  * @method collision.cpa_tcpa
  * @see docs/METHODOLOGY.md §6.1 (`collision.cpa_tcpa`)
@@ -143,16 +147,47 @@ export class CollisionDetector implements Detector<CollisionConfig> {
   private readonly tracker = new EncounterTracker();
   /** Per vessel: event time of its last collision report (kept monotonic). */
   private readonly reportedAt = new Map<number, number>();
-  /** Event time of the first position seen (grace period of restored alerts). */
+  /** Per open alert key: event time of the pair's last evaluation. */
+  private readonly evaluatedAt = new Map<string, number>();
+  /**
+   * Event time of the first position since the start (or the last reset):
+   * the grace period of restored alerts whose pair is not evaluated again.
+   */
   private firstEventTime: number | undefined;
 
   constructor(
     @Inject(SAFETY_STATE_SINK) private readonly states: SafetyStateSink,
     @Inject(ENCOUNTER_SINK) private readonly encounters: EncounterSink,
     private readonly metrics: SafetyMetrics,
-  ) {}
+    @Inject(DETECTOR_GATE) private readonly gate: DetectorGate,
+    @Inject(ALERT_SIGHTINGS) private readonly sightings: AlertSightingSink,
+  ) {
+    gate.onReset(() => {
+      this.tracker.clear();
+      this.reportedAt.clear();
+      this.evaluatedAt.clear();
+      this.firstEventTime = undefined;
+    });
+  }
 
-  async onPosition(
+  onPosition(
+    context: DetectorContext<CollisionConfig>,
+    position: VesselPosition,
+  ): Promise<void> {
+    return this.gate.position(() => this.evaluate(context, position));
+  }
+
+  /**
+   * Housekeeping in event time: closes pairs not evaluated within
+   * `COLLISION_MAX_AGE_S` (neither vessel reported) and resolves open alerts
+   * whose pair was not evaluated within that window (restored at startup or
+   * after a takeover, or left open by a failed resolution).
+   */
+  onTick(context: DetectorContext<CollisionConfig>): Promise<void> {
+    return this.gate.run(() => this.housekeeping(context));
+  }
+
+  private async evaluate(
     context: DetectorContext<CollisionConfig>,
     position: VesselPosition,
   ): Promise<void> {
@@ -179,6 +214,11 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         const key = collisionDedupKey(position.mmsi, other.mmsi);
         evaluated.add(key);
         remember(other.mmsi);
+        if (context.alerts.isOpen(key))
+          this.evaluatedAt.set(
+            key,
+            Math.max(position.time.getTime(), this.evaluatedAt.get(key) ?? 0),
+          );
         const tracked = this.tracker.get(key);
         const measurement = {
           ...measurePair(position, other),
@@ -227,12 +267,9 @@ export class CollisionDetector implements Detector<CollisionConfig> {
     await this.store(transitions);
   }
 
-  /**
-   * Housekeeping in event time: closes pairs not evaluated within
-   * `COLLISION_MAX_AGE_S` (neither vessel reported) and resolves alerts
-   * restored at startup whose pair was not evaluated again.
-   */
-  async onTick(context: DetectorContext<CollisionConfig>): Promise<void> {
+  private async housekeeping(
+    context: DetectorContext<CollisionConfig>,
+  ): Promise<void> {
     const eventTime = context.pairs.eventTime;
     if (eventTime === undefined) return;
     const cutoff = eventTime.getTime() - context.config.MAX_AGE_S * 1000;
@@ -251,15 +288,20 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       `not evaluated for ${context.config.MAX_AGE_S} s`,
     );
 
+    // Event time against event time (OpenAlert.lastSeenAt is the emitter's wall clock).
     const graceStart = this.firstEventTime ?? eventTime.getTime();
     for (const open of context.alerts.open()) {
       if (this.tracker.has(open.dedupKey)) continue;
-      if (Math.max(open.lastSeenAt.getTime(), graceStart) >= cutoff) continue;
+      if ((this.evaluatedAt.get(open.dedupKey) ?? graceStart) >= cutoff)
+        continue;
       await context.alerts.resolve(open.dedupKey, {
         at: eventTime,
         reason: 'pair no longer evaluated',
       });
     }
+    for (const [key, at] of this.evaluatedAt)
+      if (at < cutoff && !context.alerts.isOpen(key))
+        this.evaluatedAt.delete(key);
     this.report(context, before, eventTime);
     for (const [mmsi, at] of this.reportedAt)
       if (at < cutoff && this.tracker.keysOf(mmsi).length === 0)
@@ -289,7 +331,13 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       const severity =
         current === undefined ? null : collisionRiskAlertSeverity(current.risk);
       if (current !== undefined && severity !== null) {
-        await context.alerts.raise(this.signal(context, current, severity));
+        const signal = this.signal(context, current, severity);
+        const outcome = await context.alerts.raise(signal);
+        await this.sightings.record(
+          signal.dedupKey,
+          signal.occurredAt,
+          outcome,
+        );
       } else {
         const measurement = transition.measurement;
         await context.alerts.resolve(transition.key, {
@@ -395,10 +443,6 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         encounterId: encounter.encounterId,
         thresholds: { ...bands, hysteresis: context.config.HYSTERESIS },
         positions: measurement.positions,
-        orgIds: {
-          [a.mmsi]: context.fleet.orgOf(a.mmsi) ?? null,
-          [b.mmsi]: context.fleet.orgOf(b.mmsi) ?? null,
-        },
       },
     } as const;
   }

@@ -2,6 +2,7 @@ import type { SafetyVesselStateV1 } from '@darmawanweb/ais-its-contracts/events'
 import { describe, expect, it } from 'vitest';
 
 import {
+  hidePipeline,
   isMaterialStateChange,
   mergeSafetyReports,
   publicationReason,
@@ -40,6 +41,7 @@ describe('mergeSafetyReports', () => {
       ewsStatus: 1 as const,
       pipelineDistanceM: 900,
       nearestPipelineZoneId: 'z',
+      nearestPipelineOrgId: null,
       evaluatedAt: kinematics(10).time,
     };
     const ews: SafetyStateReport = {
@@ -198,5 +200,17 @@ describe('publicationReason (spec §13.7)', () => {
         state(),
       ),
     ).toBe(true);
+  });
+});
+
+describe('hidePipeline (spec §8.5: org-owned zones are tenant-private)', () => {
+  it('removes the zone and its distance, keeps the shared EWS status', () => {
+    const warned = state({ ewsStatus: 1, pipelineDistanceM: 900 });
+    expect(hidePipeline(warned)).toEqual({
+      ...warned,
+      pipelineDistanceM: null,
+      nearestPipelineZoneId: null,
+    });
+    expect(warned.nearestPipelineZoneId).not.toBeNull();
   });
 });

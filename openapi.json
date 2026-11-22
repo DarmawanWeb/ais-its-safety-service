@@ -35,7 +35,7 @@
     },
     "/api/v2/safety/vessels": {
       "get": {
-        "description": "Initial state of the live map (spec §9): latest EWS status, collision risk and closest encounter per vessel, ordered by MMSI, at most `limit` vessels with a position since `since`. Shared across tenants (spec §8.5).",
+        "description": "Initial state of the live map (spec §9): latest EWS status, collision risk and closest encounter per vessel, ordered by MMSI, at most `limit` vessels with a position since `since`. Shared across tenants (spec §8.5), except the nearest pipeline when it is a zone private to another organization: `nearestPipelineZoneId` and `pipelineDistanceM` are then `null` (authority and super_admin see every zone).",
         "operationId": "VesselStatesController_list",
         "parameters": [
           {
@@ -126,6 +126,7 @@
     },
     "/api/v2/safety/vessels/{mmsi}": {
       "get": {
+        "description": "Same visibility as the list: the nearest pipeline is `null` when it is a zone private to another organization.",
         "operationId": "VesselStatesController_get",
         "parameters": [
           {
@@ -173,7 +174,7 @@
     },
     "/api/v2/safety/events": {
       "get": {
-        "description": "Newest first (default: the last 7 days, at most 366 days). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
+        "description": "Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
         "operationId": "EventsController_list",
         "parameters": [
           {
@@ -254,6 +255,7 @@
             "name": "status",
             "required": false,
             "in": "query",
+            "description": "`open` without `from`: every open occurrence, whenever it was raised (no default range)",
             "schema": {
               "type": "string",
               "enum": [
@@ -366,7 +368,7 @@
     },
     "/api/v2/safety/encounters": {
       "get": {
-        "description": "Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), latest sample first, each with its CPA/TCPA history in the range. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.",
+        "description": "Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), newest encounter first (by start; an active encounter keeps its place while it gets new samples), each with its CPA/TCPA history in the range. The cursor keeps the window of the first page: every page reads the same `from` / `to`. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.",
         "operationId": "EncountersController_list",
         "parameters": [
           {
@@ -802,12 +804,13 @@
           "pipelineDistanceM": {
             "type": "number",
             "nullable": true,
-            "description": "Distance to the nearest active pipeline, meters"
+            "description": "Distance to the nearest active pipeline zone line that applies to the vessel (global zones and those of its own organization), meters; `null` without such a pipeline, or when it is a zone private to an organization other than the reader’s"
           },
           "nearestPipelineZoneId": {
             "type": "string",
             "format": "uuid",
-            "nullable": true
+            "nullable": true,
+            "description": "Zone id of that pipeline; `null` under the same conditions as `pipelineDistanceM`"
           },
           "collisionRisk": {
             "type": "string",
@@ -884,7 +887,7 @@
           "time": {
             "type": "string",
             "format": "date-time",
-            "description": "When the condition occurred"
+            "description": "When the condition occurred: event (AIS) time of the alert, never changed afterwards (the list is ordered and filtered by it)"
           },
           "detector": {
             "type": "string",
@@ -974,16 +977,18 @@
           "openedAt": {
             "type": "string",
             "format": "date-time",
-            "description": "When the occurrence opened"
+            "description": "When the occurrence opened (event time; an escalation keeps the opening of the alert it supersedes)"
           },
           "lastSeenAt": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Event (AIS) time of the latest signal of the condition: the alert itself, then its repeats (recorded at most every 60 s while the severity holds) and de-escalations. A resolution does not move it (see `resolvedAt`)."
           },
           "resolvedAt": {
             "type": "string",
             "format": "date-time",
-            "nullable": true
+            "nullable": true,
+            "description": "When the occurrence ended: event time of the position that ended it (the detector clock for zone changes and the collision housekeeping tick)"
           },
           "resolution": {
             "type": "object",

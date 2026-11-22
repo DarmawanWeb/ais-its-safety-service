@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { assessEws, ewsDedupKey, isLineGeometry } from './ews.js';
+import {
+  assessEws,
+  ewsDedupKey,
+  isLineGeometry,
+  pipelineAppliesTo,
+} from './ews.js';
 
 describe('assessEws (ews.pipeline_distance_status)', () => {
   const zoneId = '0195f3c4-0000-7000-8000-000000000001';
@@ -74,5 +79,18 @@ describe('EWS helpers', () => {
       }),
     ).toBe(true);
     expect(isLineGeometry({ type: 'Point', coordinates: [0, 0] })).toBe(false);
+  });
+});
+
+describe('pipelineAppliesTo (spec §8.5)', () => {
+  const ORG = '0195f3c4-0000-7000-8000-0000000000a1';
+  const OTHER = '0195f3c4-0000-7000-8000-0000000000a2';
+
+  it('applies global zones to every vessel, org zones to that organization only', () => {
+    expect(pipelineAppliesTo(null, null)).toBe(true);
+    expect(pipelineAppliesTo(null, ORG)).toBe(true);
+    expect(pipelineAppliesTo(ORG, ORG)).toBe(true);
+    expect(pipelineAppliesTo(ORG, OTHER)).toBe(false);
+    expect(pipelineAppliesTo(ORG, null)).toBe(false);
   });
 });

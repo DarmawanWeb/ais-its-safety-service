@@ -89,11 +89,18 @@ export class SafetyVesselStateDto {
   @ApiProperty({
     type: Number,
     nullable: true,
-    description: 'Distance to the nearest active pipeline, meters',
+    description:
+      'Distance to the nearest active pipeline zone line that applies to the vessel (global zones and those of its own organization), meters; `null` without such a pipeline, or when it is a zone private to an organization other than the reader’s',
   })
   readonly pipelineDistanceM: number | null;
 
-  @ApiProperty({ type: String, format: 'uuid', nullable: true })
+  @ApiProperty({
+    type: String,
+    format: 'uuid',
+    nullable: true,
+    description:
+      'Zone id of that pipeline; `null` under the same conditions as `pipelineDistanceM`',
+  })
   readonly nearestPipelineZoneId: string | null;
 
   @ApiProperty({ enum: COLLISION_RISKS })

@@ -33,6 +33,8 @@ export interface EwsStatePart {
   readonly ewsStatus: EwsStatus;
   readonly pipelineDistanceM: number | null;
   readonly nearestPipelineZoneId: string | null;
+  /** Owner of the nearest pipeline zone, `null` = global (spec §8.5). */
+  readonly nearestPipelineOrgId: string | null;
   /** Event time of the evaluation (newest wins). */
   readonly evaluatedAt: Date;
 }
@@ -95,6 +97,24 @@ export function safetyStateMethodIds(evaluated: {
     ...(evaluated.ews ? [EWS_METHOD_ID] : []),
     ...(evaluated.collision ? [COLLISION_METHOD_ID] : []),
   ];
+}
+
+/** The pipeline fields a state shares only with the owner of an org-owned pipeline zone. */
+export interface PipelineFields {
+  readonly pipelineDistanceM: number | null;
+  readonly nearestPipelineZoneId: string | null;
+}
+
+/**
+ * `state` without its nearest pipeline (zone and distance `null`), for
+ * readers outside the organization that owns the pipeline zone (spec §8.5:
+ * org-owned zones are tenant-private; the EWS status itself stays shared,
+ * navigational safety is a shared concern).
+ */
+export function hidePipeline<State extends PipelineFields>(
+  state: State,
+): State {
+  return { ...state, pipelineDistanceM: null, nearestPipelineZoneId: null };
 }
 
 /**

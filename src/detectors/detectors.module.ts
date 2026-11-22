@@ -5,6 +5,8 @@ import { Module } from '@nestjs/common';
 import type { Config } from '../config.js';
 import { EncountersModule } from '../modules/encounters/encounters.module.js';
 import { VesselStatesModule } from '../modules/vessel-states/vessel-states.module.js';
+import { ALERT_SIGHTINGS, AlertSightings } from './alert-sightings.js';
+import { AlertStateSync, DETECTOR_GATE } from './alert-state-sync.js';
 import { CollisionDetector } from './collision/collision.detector.js';
 import { COLLISION_MAX_AGE_LIMIT_S } from './collision/collision.config.js';
 import { DetectorEventsRepository } from './detector-events.repository.js';
@@ -24,6 +26,10 @@ const PAIR_SEARCH_CELL_M = 3704;
  * Distances use the `'sphere'` model: it reproduces Turf.js 7, which the
  * legacy EWS rule used, to 1e-6 m (the `'wgs84'` default differs by up to
  * 13 m, enough to flip a status at the 500 / 1 750 m thresholds).
+ *
+ * The detectors run through `AlertStateSync` (the kit does not reload the
+ * alert state when a standby takes over) and report repeated signals to
+ * `AlertSightings` (`events.last_seen_at`).
  */
 @Module({
   imports: [
@@ -33,6 +39,7 @@ const PAIR_SEARCH_CELL_M = 3704;
       inject: [APP_CONFIG],
       useFactory: (config: Config) => ({
         positions: 'safety-positions',
+        exclusive: { pinnedTtlMs: config.DETECTOR_PINNED_TTL_MS },
         concurrency: config.DETECTOR_CONCURRENCY,
         distanceModel: 'sphere',
         alertCooldownMs: config.ALERT_COOLDOWN_S * 1000,
@@ -46,6 +53,14 @@ const PAIR_SEARCH_CELL_M = 3704;
     }),
   ],
   controllers: [DetectorsController],
-  providers: [EwsDetector, CollisionDetector],
+  providers: [
+    DetectorEventsRepository,
+    AlertStateSync,
+    { provide: DETECTOR_GATE, useExisting: AlertStateSync },
+    AlertSightings,
+    { provide: ALERT_SIGHTINGS, useExisting: AlertSightings },
+    EwsDetector,
+    CollisionDetector,
+  ],
 })
 export class DetectorsModule {}

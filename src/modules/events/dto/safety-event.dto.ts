@@ -21,7 +21,8 @@ export class SafetyEventDto {
 
   @ApiProperty({
     format: 'date-time',
-    description: 'When the condition occurred',
+    description:
+      'When the condition occurred: event (AIS) time of the alert, never changed afterwards (the list is ordered and filtered by it)',
   })
   readonly time: string;
 
@@ -102,14 +103,25 @@ export class SafetyEventDto {
 
   @ApiProperty({
     format: 'date-time',
-    description: 'When the occurrence opened',
+    description:
+      'When the occurrence opened (event time; an escalation keeps the opening of the alert it supersedes)',
   })
   readonly openedAt: string;
 
-  @ApiProperty({ format: 'date-time' })
+  @ApiProperty({
+    format: 'date-time',
+    description:
+      'Event (AIS) time of the latest signal of the condition: the alert itself, then its repeats (recorded at most every 60 s while the severity holds) and de-escalations. A resolution does not move it (see `resolvedAt`).',
+  })
   readonly lastSeenAt: string;
 
-  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the occurrence ended: event time of the position that ended it (the detector clock for zone changes and the collision housekeeping tick)',
+  })
   readonly resolvedAt: string | null;
 
   @ApiProperty({

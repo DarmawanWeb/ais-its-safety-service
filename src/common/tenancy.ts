@@ -20,3 +20,18 @@ export function safetyReadScope(principal: Principal): SafetyReadScope {
   if (principal.orgId === null) return { kind: 'none' };
   return { kind: 'org', orgId: principal.orgId };
 }
+
+/**
+ * `true` when a reader of `scope` may see the identity and distance of the
+ * pipeline zone owned by `pipelineOrgId` (spec §8.5): global zones
+ * (`null`) are shared, an org-owned zone only with that organization and
+ * with `authority` / `super_admin`. A reader without organization (`none`,
+ * also the shared `SAFETY` stream) sees global zones only.
+ */
+export function canSeePipeline(
+  scope: SafetyReadScope,
+  pipelineOrgId: string | null,
+): boolean {
+  if (pipelineOrgId === null || scope.kind === 'all') return true;
+  return scope.kind === 'org' && scope.orgId === pipelineOrgId;
+}

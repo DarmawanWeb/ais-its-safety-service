@@ -33,17 +33,27 @@ const EventCursorSchema = z.object({
 export class EventsService {
   constructor(private readonly events: EventsRepository) {}
 
-  /** A page of events matching the query, newest first. */
+  /**
+   * A page of events matching the query, newest first. `status=open`
+   * without `from` lists every open occurrence, however long ago it was
+   * raised (an EWS warning can last weeks); `to` then only applies when given.
+   */
   async list(
     query: ListEventsQuery,
     principal: Principal,
     now: Date = new Date(),
   ): Promise<CursorPage<EventRecord>> {
-    const { from, to } = resolveQueryTimeRange(query, {
-      defaultDurationMs: EVENTS_DEFAULT_RANGE_MS,
-      maxDurationMs: EVENTS_MAX_RANGE_MS,
-      now,
-    });
+    const { from, to } =
+      query.status === 'open' && query.from === undefined
+        ? {
+            from: undefined,
+            to: query.to === undefined ? undefined : new Date(query.to),
+          }
+        : resolveQueryTimeRange(query, {
+            defaultDurationMs: EVENTS_DEFAULT_RANGE_MS,
+            maxDurationMs: EVENTS_MAX_RANGE_MS,
+            now,
+          });
     const after = decodeQueryCursor(query, EventCursorSchema);
     const rows = await this.events.list(
       {

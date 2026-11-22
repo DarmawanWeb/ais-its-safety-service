@@ -85,6 +85,12 @@ export class EncounterTracker {
     return this.encounters.has(key);
   }
 
+  /** Forgets every pair (the state of another instance's period is unknown). */
+  clear(): void {
+    this.encounters.clear();
+    this.byVessel.clear();
+  }
+
   /** Keys of the pairs a vessel belongs to. */
   keysOf(mmsi: number): string[] {
     return [...(this.byVessel.get(mmsi) ?? [])];

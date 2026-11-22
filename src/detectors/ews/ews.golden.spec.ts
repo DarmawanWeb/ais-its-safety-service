@@ -9,7 +9,11 @@ import { describe, expect, it } from 'vitest';
 import * as z from 'zod';
 
 import { assessEws } from '../../domain/ews.js';
-import { RecordingStateSink } from '../__testing__/fakes.js';
+import {
+  RecordingSightings,
+  RecordingStateSink,
+  TestGate,
+} from '../__testing__/fakes.js';
 import { EwsDetector, nearestPipeline } from './ews.detector.js';
 
 /**
@@ -60,7 +64,7 @@ describe('EWS legacy parity (golden, ews.pipeline_distance_status)', () => {
   it.each(golden.cases)(
     '$label: distance and status equal checkShipStatus',
     (testCase) => {
-      const nearest = nearestPipeline(index, testCase);
+      const nearest = nearestPipeline(index, testCase, null);
       expect(nearest?.zoneId).toBe(pipelineZone.id);
       // The SDK's sphere model reproduces @turf/nearest-point-on-line 7.2 + @turf/distance.
       expect(
@@ -88,7 +92,13 @@ describe('EWS legacy parity (golden, ews.pipeline_distance_status)', () => {
 
   it('raises the alert severity of the legacy status through the detector', async () => {
     const harness = DetectorTestHarness.create({
-      detectors: [new EwsDetector(new RecordingStateSink())],
+      detectors: [
+        new EwsDetector(
+          new RecordingStateSink(),
+          new TestGate(),
+          new RecordingSightings(),
+        ),
+      ],
       distanceModel: 'sphere',
     });
     await harness.zone(pipelineZone);

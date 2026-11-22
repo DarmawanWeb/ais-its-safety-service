@@ -7,6 +7,7 @@ import type { ZoneSnapshotV1 } from '@darmawanweb/ais-its-contracts/events';
 import {
   type Detector,
   type DetectorContext,
+  type DetectorVesselChange,
   type DetectorZoneChange,
   RegisterDetector,
   type VesselPosition,
@@ -20,12 +21,15 @@ import {
   ewsDedupKey,
   EWS_METHOD_ID,
   isLineGeometry,
+  pipelineAppliesTo,
   type PipelineProximity,
 } from '../../domain/ews.js';
 import {
   SAFETY_STATE_SINK,
   type SafetyStateSink,
 } from '../../modules/vessel-states/safety-state.sink.js';
+import { ALERT_SIGHTINGS, type AlertSightingSink } from '../alert-sightings.js';
+import { DETECTOR_GATE, type DetectorGate } from '../alert-state-sync.js';
 import { EWS_ALERT_TYPE } from '../alert-types.js';
 import { kinematicsOf, vesselLabel } from '../vessel-kinematics.js';
 import {
@@ -41,37 +45,51 @@ export function isEwsPipeline(zone: ZoneSnapshotV1): boolean {
   );
 }
 
+/** The nearest pipeline of a position: the distance to its line and the zone. */
+export interface NearestPipeline extends PipelineProximity {
+  readonly zone: ZoneSnapshotV1;
+}
+
 /**
- * The nearest active pipeline zone of a position, with the distance to its
- * line. The runner's `ZoneIndex` uses the `'sphere'` distance model, which
- * reproduces `@turf/nearest-point-on-line` + `@turf/distance` 7 of the
- * legacy rule (verified by the golden tests).
+ * The nearest active pipeline zone that applies to a vessel of `vesselOrgId`
+ * (global zones and the organization's own, {@link pipelineAppliesTo}), with
+ * the distance to its line. The runner's `ZoneIndex` uses the `'sphere'`
+ * distance model, which reproduces `@turf/nearest-point-on-line` +
+ * `@turf/distance` 7 of the legacy rule (verified by the golden tests).
  */
 export function nearestPipeline(
   zones: ZoneIndex,
   position: Pick<VesselPosition, 'lat' | 'lon'>,
-): PipelineProximity | undefined {
+  vesselOrgId: string | null,
+): NearestPipeline | undefined {
   const nearest = zones.nearest(position, {
     kinds: ['pipeline'],
-    filter: isEwsPipeline,
+    filter: (zone) =>
+      isEwsPipeline(zone) && pipelineAppliesTo(zone.orgId, vesselOrgId),
   });
   return nearest === undefined
     ? undefined
-    : { zoneId: nearest.zone.id, distanceM: nearest.distanceM };
+    : {
+        zoneId: nearest.zone.id,
+        distanceM: nearest.distanceM,
+        zone: nearest.zone,
+      };
 }
 
 /**
  * Pipeline Early Warning System (spec §13.7, legacy `checkShipStatus`
  * parity): for every position, the distance to the nearest active pipeline
  * zone line and the EWS status of a vessel predicted at anchor (0 danger
- * below `EWS_DANGER_M`, 1 warning below `EWS_WARNING_M`, 3 safe). It reports
- * the EWS part of the vessel's safety state and raises `ews` alerts with
+ * below `EWS_DANGER_M`, 1 warning below `EWS_WARNING_M`, 3 safe). The
+ * pipelines are the global ones plus those of the vessel's own organization
+ * (spec §8.5: org-owned zones are tenant-private). It reports the EWS part
+ * of the vessel's safety state and raises `ews` alerts with
  * `dedupKey = ews:<mmsi>:<zoneId>` on the transition to warning or danger
  * and on escalation (`critical` for danger, `warning` for warning — the
  * emitter publishes nothing while the status is unchanged and records a
  * de-escalation without publishing); the occurrence is resolved when the
  * vessel is safe again, when another pipeline becomes the nearest one, or
- * when its pipeline zone is removed.
+ * when its pipeline zone is removed or no longer applies to the vessel.
  *
  * @method ews.pipeline_distance_status
  * @see docs/METHODOLOGY.md §5.1 (`ews.pipeline_distance_status`)
@@ -88,14 +106,75 @@ export class EwsDetector implements Detector<EwsConfig> {
 
   constructor(
     @Inject(SAFETY_STATE_SINK) private readonly states: SafetyStateSink,
+    @Inject(DETECTOR_GATE) private readonly gate: DetectorGate,
+    @Inject(ALERT_SIGHTINGS) private readonly sightings: AlertSightingSink,
   ) {}
 
-  async onPosition(
+  onPosition(
+    context: DetectorContext<EwsConfig>,
+    position: VesselPosition,
+  ): Promise<void> {
+    return this.gate.position(() => this.evaluate(context, position));
+  }
+
+  /** Resolves the open alerts of a pipeline zone that was deleted, deactivated, is no longer a line or became another organization's. */
+  onZoneChanged(
+    context: DetectorContext<EwsConfig>,
+    change: DetectorZoneChange,
+  ): Promise<void> {
+    return this.gate.run(async () => {
+      const { zone } = change;
+      const pipeline = change.kind === 'upserted' && isEwsPipeline(zone);
+      for (const open of context.alerts.open()) {
+        if (open.zoneId !== zone.id) continue;
+        if (
+          pipeline &&
+          pipelineAppliesTo(zone.orgId, context.fleet.orgOf(open.mmsi) ?? null)
+        )
+          continue;
+        await context.alerts.resolve(open.dedupKey, {
+          at: context.now(),
+          reason:
+            change.kind === 'deleted'
+              ? 'pipeline zone deleted'
+              : pipeline
+                ? 'pipeline zone is private to another organization'
+                : 'zone is no longer an active pipeline',
+        });
+      }
+    });
+  }
+
+  /** Resolves the open alerts on org-owned pipelines that no longer apply to a vessel that changed organization. */
+  onVesselChanged(
+    context: DetectorContext<EwsConfig>,
+    change: DetectorVesselChange,
+  ): Promise<void> {
+    return this.gate.run(async () => {
+      const orgId = context.fleet.orgOf(change.mmsi) ?? null;
+      for (const open of context.alerts.open({ mmsi: change.mmsi })) {
+        const zone =
+          open.zoneId === null ? undefined : context.zones.get(open.zoneId);
+        if (zone === undefined || pipelineAppliesTo(zone.orgId, orgId))
+          continue;
+        await context.alerts.resolve(open.dedupKey, {
+          at: context.now(),
+          reason: 'pipeline zone is private to another organization',
+        });
+      }
+    });
+  }
+
+  private async evaluate(
     context: DetectorContext<EwsConfig>,
     position: VesselPosition,
   ): Promise<void> {
     const thresholds = ewsThresholds(context.config);
-    const nearest = nearestPipeline(context.zones, position);
+    const nearest = nearestPipeline(
+      context.zones,
+      position,
+      context.fleet.orgOf(position.mmsi) ?? null,
+    );
     const assessment = assessEws(
       nearest,
       position.predictedNavstatus,
@@ -108,18 +187,23 @@ export class EwsDetector implements Detector<EwsConfig> {
         ewsStatus: assessment.ewsStatus,
         pipelineDistanceM: assessment.pipelineDistanceM,
         nearestPipelineZoneId: assessment.nearestPipelineZoneId,
+        nearestPipelineOrgId: nearest?.zone.orgId ?? null,
         evaluatedAt: position.time,
       },
     });
 
-    const zone =
-      nearest === undefined ? undefined : context.zones.get(nearest.zoneId);
     let activeKey: string | undefined;
-    if (assessment.severity !== null && zone !== undefined) {
-      activeKey = ewsDedupKey(position.mmsi, zone.id);
-      await context.alerts.raise(
-        this.signal(context, position, zone, assessment, assessment.severity),
+    if (assessment.severity !== null && nearest !== undefined) {
+      const signal = this.signal(
+        context,
+        position,
+        nearest.zone,
+        assessment,
+        assessment.severity,
       );
+      activeKey = signal.dedupKey;
+      const outcome = await context.alerts.raise(signal);
+      await this.sightings.record(activeKey, position.time, outcome);
     }
     for (const open of context.alerts.open({ mmsi: position.mmsi })) {
       if (open.dedupKey === activeKey) continue;
@@ -139,24 +223,12 @@ export class EwsDetector implements Detector<EwsConfig> {
     }
   }
 
-  /** Resolves the open alerts of a pipeline zone that was deleted, deactivated or is no longer a pipeline line. */
-  async onZoneChanged(
-    context: DetectorContext<EwsConfig>,
-    change: DetectorZoneChange,
-  ): Promise<void> {
-    if (change.kind === 'upserted' && isEwsPipeline(change.zone)) return;
-    for (const open of context.alerts.open()) {
-      if (open.zoneId !== change.zone.id) continue;
-      await context.alerts.resolve(open.dedupKey, {
-        at: context.now(),
-        reason:
-          change.kind === 'deleted'
-            ? 'pipeline zone deleted'
-            : 'zone is no longer an active pipeline',
-      });
-    }
-  }
-
+  /**
+   * The alert of a vessel in warning or danger. The zone is global or the
+   * vessel's organization's own, so its name may appear in the texts; the
+   * owner organizations are not part of the payload (consumers look them up
+   * in their own `FLEET` projection).
+   */
   private signal(
     context: DetectorContext<EwsConfig>,
     position: VesselPosition,
@@ -191,7 +263,6 @@ export class EwsDetector implements Detector<EwsConfig> {
         predictedNavstatus: position.predictedNavstatus,
         navstatus: position.navstatus,
         sog: position.sog,
-        orgId: context.fleet.orgOf(position.mmsi) ?? null,
       },
     } as const;
   }

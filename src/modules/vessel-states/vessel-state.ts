@@ -17,6 +17,8 @@ export interface VesselStateRecord {
   readonly ewsStatus: EwsStatus;
   readonly pipelineDistanceM: number | null;
   readonly nearestPipelineZoneId: string | null;
+  /** Owner of the nearest pipeline zone, `null` = global (decides who sees it, spec §8.5). */
+  readonly nearestPipelineOrgId: string | null;
   readonly collisionRisk: CollisionRisk;
   readonly closestEncounter: ClosestEncounter | null;
   readonly methodIds: readonly string[];

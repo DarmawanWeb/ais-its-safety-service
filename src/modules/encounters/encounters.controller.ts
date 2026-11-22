@@ -22,7 +22,7 @@ export class EncountersController {
   @ApiOperation({
     summary: 'Collision encounters with their CPA/TCPA history',
     description:
-      'Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), latest sample first, each with its CPA/TCPA history in the range. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.',
+      'Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), newest encounter first (by start; an active encounter keeps its place while it gets new samples), each with its CPA/TCPA history in the range. The cursor keeps the window of the first page: every page reads the same `from` / `to`. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.',
   })
   @ApiCursorResponse(EncounterDto)
   async list(
