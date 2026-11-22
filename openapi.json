@@ -35,7 +35,7 @@
     },
     "/api/v2/safety/vessels": {
       "get": {
-        "description": "Initial state of the live map (spec §9): latest EWS status, collision risk and closest encounter per vessel, ordered by MMSI, at most `limit` vessels with a position since `since`. Shared across tenants (spec §8.5), except the nearest pipeline when it is a zone private to another organization: `nearestPipelineZoneId` and `pipelineDistanceM` are then `null` (authority and super_admin see every zone).",
+        "description": "Initial state of the live map (spec §9): latest EWS status, collision risk and closest encounter per vessel, ordered by MMSI, at most `limit` vessels with a position since `since`, with the vessel’s fleet identity and the nearest pipeline’s code and name. Shared across tenants (spec §8.5), except the nearest pipeline when it is a zone private to another organization: `nearestPipelineZoneId`, `nearestPipeline` and `pipelineDistanceM` are then `null` (authority and super_admin see every zone).",
         "operationId": "VesselStatesController_list",
         "parameters": [
           {
@@ -126,18 +126,18 @@
     },
     "/api/v2/safety/vessels/{mmsi}": {
       "get": {
-        "description": "Same visibility as the list: the nearest pipeline is `null` when it is a zone private to another organization.",
+        "description": "Same visibility as the list: the nearest pipeline (id, identity, distance) is `null` when it is a zone private to another organization.",
         "operationId": "VesselStatesController_get",
         "parameters": [
           {
             "name": "mmsi",
             "required": true,
             "in": "path",
+            "description": "MMSI: exactly nine digits",
             "schema": {
-              "minimum": 100000000,
-              "maximum": 999999999,
-              "example": 525005223,
-              "type": "number"
+              "type": "string",
+              "pattern": "^[0-9]{9}$",
+              "example": "525005223"
             }
           }
         ],
@@ -174,7 +174,7 @@
     },
     "/api/v2/safety/events": {
       "get": {
-        "description": "Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
+        "description": "Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Each event carries the fleet identities of its vessels (`vessel`, `relatedVessel`) and, in `data` / `resolution`, the localizable text (`messageKey`, `messageParams`). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
         "operationId": "EventsController_list",
         "parameters": [
           {
@@ -328,10 +328,10 @@
             "name": "id",
             "required": true,
             "in": "path",
-            "description": "Event id = alert id",
+            "description": "UUID",
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -368,7 +368,7 @@
     },
     "/api/v2/safety/encounters": {
       "get": {
-        "description": "Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), newest encounter first (by start; an active encounter keeps its place while it gets new samples), each with its CPA/TCPA history in the range. The cursor keeps the window of the first page: every page reads the same `from` / `to`. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.",
+        "description": "Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), newest encounter first (by start; an active encounter keeps its place while it gets new samples), each with its CPA/TCPA history in the range, the predicted positions at the closest point of approach per sample (`cpaPositions`), the fleet identities of both vessels and a localizable text (`messageKey`, `messageParams`). `active=true` keeps the encounters still in progress (latest sample above `none` and at most `COLLISION_MAX_AGE_S` + `COLLISION_SAMPLE_INTERVAL_S` + 30 s old), `active=false` the ended ones; `bbox` keeps the encounters with a sample in the range where either vessel’s report lies in the box. The cursor keeps the window (and the `active` cut-off) of the first page: every page reads the same `from` / `to`. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.",
         "operationId": "EncountersController_list",
         "parameters": [
           {
@@ -413,6 +413,16 @@
             }
           },
           {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
             "name": "risk",
             "required": false,
             "in": "query",
@@ -439,6 +449,15 @@
             "schema": {
               "format": "uuid",
               "type": "string"
+            }
+          },
+          {
+            "name": "active",
+            "required": false,
+            "in": "query",
+            "description": "`true`: only active encounters — the newest encounter of its pair, whose latest sample has a band above `none` and is at most `COLLISION_MAX_AGE_S` + `COLLISION_SAMPLE_INTERVAL_S` + 30 s (180 s with the defaults) older than the collision detector’s event clock: the AIS time of its newest evaluation (positions lag the wall clock), never later than the request time. `false`: only ended ones, including an encounter followed by a newer one of the same pair (a takeover or restart starts a pair over with a new `encounterId`). The cursor keeps the first page’s cut-off.",
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -530,7 +549,7 @@
   "info": {
     "title": "AIS Maritime Intelligence — AIS ITS Safety Service",
     "description": "Navigational safety analytics (pipeline Early Warning System, collision risk CPA/TCPA) built on the Detector SDK",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "contact": {}
   },
   "tags": [
@@ -637,7 +656,9 @@
               "telemetry",
               "geo",
               "safety",
-              "surveillance"
+              "surveillance",
+              "notification",
+              "security"
             ],
             "nullable": true
           },
@@ -655,6 +676,7 @@
             "enum": [
               "implemented",
               "planned",
+              "not_implemented",
               "deprecated"
             ],
             "nullable": true
@@ -699,6 +721,30 @@
           "methods"
         ]
       },
+      "PipelineIdentityDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Zone id"
+          },
+          "code": {
+            "type": "string",
+            "example": "PL-SBY-01",
+            "description": "Zone code"
+          },
+          "name": {
+            "type": "string",
+            "example": "Pipeline Surabaya West"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "name"
+        ]
+      },
       "ClosestEncounterDto": {
         "type": "object",
         "properties": {
@@ -729,16 +775,24 @@
         "properties": {
           "id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Fleet vessel id"
           },
           "name": {
             "type": "string",
             "example": "KM Bahari Nusantara"
+          },
+          "typeCode": {
+            "type": "string",
+            "nullable": true,
+            "example": "tanker",
+            "description": "Vessel type code of the fleet registry"
           }
         },
         "required": [
           "id",
-          "name"
+          "name",
+          "typeCode"
         ]
       },
       "SafetyVesselStateDto": {
@@ -812,6 +866,16 @@
             "nullable": true,
             "description": "Zone id of that pipeline; `null` under the same conditions as `pipelineDistanceM`"
           },
+          "nearestPipeline": {
+            "nullable": true,
+            "description": "Code and name of that pipeline zone (also after it was deleted, until the vessel is evaluated again); `null` under the same conditions as `pipelineDistanceM`, or when the zone is not (yet) in the `zones` projection",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PipelineIdentityDto"
+              }
+            ]
+          },
           "collisionRisk": {
             "type": "string",
             "enum": [
@@ -843,6 +907,7 @@
           },
           "vessel": {
             "nullable": true,
+            "description": "Fleet identity of the vessel (shared across tenants); `null` for an unregistered MMSI",
             "type": "object",
             "allOf": [
               {
@@ -869,6 +934,7 @@
           "ewsStatus",
           "pipelineDistanceM",
           "nearestPipelineZoneId",
+          "nearestPipeline",
           "collisionRisk",
           "closestEncounter",
           "methodIds",
@@ -940,6 +1006,26 @@
             "nullable": true,
             "description": "Other vessel (collision)"
           },
+          "vessel": {
+            "nullable": true,
+            "description": "Fleet identity of `mmsi` (shared across tenants, spec §8.5); `null` for an unregistered MMSI",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SafetyVesselIdentityDto"
+              }
+            ]
+          },
+          "relatedVessel": {
+            "nullable": true,
+            "description": "Fleet identity of `relatedMmsi`; `null` without a related vessel or for an unregistered MMSI",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SafetyVesselIdentityDto"
+              }
+            ]
+          },
           "zoneId": {
             "type": "string",
             "format": "uuid",
@@ -972,7 +1058,7 @@
           "data": {
             "type": "object",
             "additionalProperties": true,
-            "description": "Detector specific details (distances, thresholds, CPA/TCPA, …)"
+            "description": "Detector specific details (distances, thresholds, CPA/TCPA, …) and the localizable text of the alert: `messageKey` (stable key, README \"Localizable texts\") with `messageParams` (absent on events stored before 0.2.0)"
           },
           "openedAt": {
             "type": "string",
@@ -994,7 +1080,7 @@
             "type": "object",
             "additionalProperties": true,
             "nullable": true,
-            "description": "Why and how it ended (`reason`, last measurements)"
+            "description": "Why and how it ended: `reason` (English), the last measurements and the localizable text `messageKey` / `messageParams` (absent on events resolved before 0.2.0)"
           }
         },
         "required": [
@@ -1008,6 +1094,8 @@
           "status",
           "mmsi",
           "relatedMmsi",
+          "vessel",
+          "relatedVessel",
           "zoneId",
           "lat",
           "lon",
@@ -1092,6 +1180,38 @@
           "b"
         ]
       },
+      "LatLonDto": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "example": -6.9
+          },
+          "lon": {
+            "type": "number",
+            "example": 112.75
+          }
+        },
+        "required": [
+          "lat",
+          "lon"
+        ]
+      },
+      "CpaPositionsDto": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "$ref": "#/components/schemas/LatLonDto"
+          },
+          "b": {
+            "$ref": "#/components/schemas/LatLonDto"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ]
+      },
       "EncounterSampleDto": {
         "type": "object",
         "properties": {
@@ -1125,6 +1245,16 @@
           },
           "positions": {
             "$ref": "#/components/schemas/EncounterPositionsDto"
+          },
+          "cpaPositions": {
+            "nullable": true,
+            "description": "Predicted positions of both vessels at the closest point of approach (method `collision.cpa_tcpa`): each report dead-reckoned on constant SOG/COG to `time` + `tcpaMin`. `null` without relative motion (`tcpaMin` `null`) or when the closest point lies in the past (`tcpaMin` < 0)",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CpaPositionsDto"
+              }
+            ]
           }
         },
         "required": [
@@ -1133,7 +1263,8 @@
           "tcpaMin",
           "rangeNm",
           "risk",
-          "positions"
+          "positions",
+          "cpaPositions"
         ]
       },
       "EncounterDto": {
@@ -1152,6 +1283,26 @@
             "type": "number",
             "example": 525005224,
             "description": "Higher MMSI of the pair"
+          },
+          "vesselA": {
+            "nullable": true,
+            "description": "Fleet identity of `mmsiA` (shared across tenants, spec §8.5); `null` for an unregistered MMSI",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SafetyVesselIdentityDto"
+              }
+            ]
+          },
+          "vesselB": {
+            "nullable": true,
+            "description": "Fleet identity of `mmsiB`; `null` for an unregistered MMSI",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SafetyVesselIdentityDto"
+              }
+            ]
           },
           "startedAt": {
             "type": "string",
@@ -1183,17 +1334,49 @@
             "items": {
               "$ref": "#/components/schemas/EncounterSampleDto"
             }
+          },
+          "messageKey": {
+            "type": "string",
+            "example": "safety.collision.encounter",
+            "description": "Stable key of the encounter’s sentence (README \"Localizable texts\"): `safety.collision.encounter`"
+          },
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "example": {
+              "vesselA": "KM Silang (MMSI 525005223)",
+              "mmsiA": 525005223,
+              "vesselB": "MMSI 525005224",
+              "mmsiB": 525005224,
+              "peakRisk": "high",
+              "minCpaM": 157,
+              "minCpaNm": 0.08
+            },
+            "description": "Values of the sentence: `vesselA` / `vesselB` (name with MMSI, or the MMSI), `mmsiA`, `mmsiB`, `peakRisk`, `minCpaM` (whole metres, the platform unit of distance params) and `minCpaNm` (2 decimals, the unit of the English sentence)"
           }
         },
         "required": [
           "encounterId",
           "mmsiA",
           "mmsiB",
+          "vesselA",
+          "vesselB",
           "startedAt",
           "lastSampleAt",
           "peakRisk",
           "minCpaNm",
-          "history"
+          "history",
+          "messageKey",
+          "messageParams"
         ]
       },
       "DetectorDescriptionDto": {

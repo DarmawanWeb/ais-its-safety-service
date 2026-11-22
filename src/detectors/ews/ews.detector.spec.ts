@@ -1,16 +1,13 @@
 import type { GeoJsonGeometry } from '@darmawanweb/ais-its-contracts/domain';
 import { ConfigValidationError } from '@darmawanweb/ais-its-nest';
 import {
+  type AlertPersistence,
   destinationPoint,
   DetectorTestHarness,
 } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
-import {
-  RecordingSightings,
-  RecordingStateSink,
-  TestGate,
-} from '../__testing__/fakes.js';
+import { RecordingStateSink } from '../__testing__/fakes.js';
 import { EwsDetector } from './ews.detector.js';
 
 /** A north–south pipeline along 112.70°E from 6.90°S to 6.80°S. */
@@ -33,17 +30,32 @@ const anchored = {
   cog: 12,
 };
 
-function setup(env: Record<string, string> = {}) {
+const MINUTE = 60_000;
+/** The runner's default alert cooldown (`ALERT_COOLDOWN_S` = 600). */
+const COOLDOWN_MS = 10 * MINUTE;
+
+function setup(
+  env: Record<string, string> = {},
+  persistence?: AlertPersistence,
+) {
   const states = new RecordingStateSink();
-  const gate = new TestGate();
-  const sightings = new RecordingSightings();
   const harness = DetectorTestHarness.create({
-    detectors: [new EwsDetector(states, gate, sightings)],
+    detectors: [new EwsDetector(states)],
     distanceModel: 'sphere',
+    alertCooldownMs: COOLDOWN_MS,
+    persistence,
     env,
   });
-  return { harness, states, gate, sightings };
+  return { harness, states };
 }
+
+/** Under way again (predicted not at anchor): safe. */
+const underWay = {
+  navstatus: 0,
+  predictedNavstatus: 0 as const,
+  sog: 6,
+  cog: 90,
+};
 
 describe('EwsDetector', () => {
   it('raises a warning on entering the warning band, with the method and thresholds', async () => {
@@ -71,9 +83,22 @@ describe('EwsDetector', () => {
           zoneId: zone.id,
           thresholds: { dangerM: 500, warningM: 1750 },
           pipelineDistanceM: expect.closeTo(1000, 3) as unknown,
+          messageKey: 'safety.ews.anchored_near_pipeline',
+          messageParams: {
+            vessel: `MMSI ${MMSI}`,
+            mmsi: MMSI,
+            status: 'warning',
+            distanceM: 1000,
+            thresholdM: 1750,
+            zoneCode: zone.code,
+            zoneName: 'Test pipeline',
+          },
         }) as unknown,
       }),
     ]);
+    expect(harness.alertsOf('ews')[0]?.message).toBe(
+      `MMSI ${MMSI} is predicted at anchor 1000 m from pipeline Test pipeline (warning below 1750 m)`,
+    );
   });
 
   it('does not repeat while unchanged, escalates to danger, de-escalates silently and resolves when safe', async () => {
@@ -351,29 +376,157 @@ describe('EwsDetector', () => {
     });
   });
 
-  it('reports every signal with its event time to the sightings (last_seen_at)', async () => {
-    const { harness, sightings } = setup();
+  it('hands unchanged signals to onRepeated with their event time, at most every 60 s (last_seen_at)', async () => {
+    const repeated: [string, Date][] = [];
+    const { harness } = setup(
+      {},
+      {
+        onRepeated: (alert, occurredAt) => {
+          repeated.push([alert.dedupKey, occurredAt]);
+          return Promise.resolve();
+        },
+      },
+    );
     const zone = await harness.zone({ kind: 'pipeline', geometry: LINE });
     const t0 = new Date('2026-03-01T00:00:00.000Z');
-    await harness.position({
-      mmsi: MMSI,
-      ...east(1000),
-      ...anchored,
-      time: t0,
-    });
-    await harness.position({
-      mmsi: MMSI,
-      ...east(1010),
-      ...anchored,
-      time: new Date(t0.getTime() + 180_000),
-    });
-    expect(sightings.records).toEqual([
-      { dedupKey: `ews:${MMSI}:${zone.id}`, seenAt: t0, outcome: 'raised' },
-      {
-        dedupKey: `ews:${MMSI}:${zone.id}`,
-        seenAt: new Date(t0.getTime() + 180_000),
-        outcome: 'unchanged',
-      },
+    const at = (seconds: number) => new Date(t0.getTime() + seconds * 1000);
+    for (const seconds of [0, 30, 90, 120, 180])
+      await harness.position({
+        mmsi: MMSI,
+        ...east(1000 + seconds / 10),
+        ...anchored,
+        time: at(seconds),
+      });
+    expect(harness.alertsOf('ews')).toHaveLength(1);
+    expect(repeated).toEqual([
+      [`ews:${MMSI}:${zone.id}`, at(90)],
+      [`ews:${MMSI}:${zone.id}`, at(180)],
     ]);
+  });
+
+  describe('resolution events (alert.resolved.v1)', () => {
+    it('publishes one event once the cooldown since the raise is over', async () => {
+      const { harness } = setup();
+      const zone = await harness.zone({ kind: 'pipeline', geometry: LINE });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      harness.advance(MINUTE);
+      await harness.position({ mmsi: MMSI, ...east(1000), ...underWay });
+      expect(harness.resolutions).toHaveLength(1);
+      await harness.maintain();
+      expect(harness.resolvedEvents).toEqual([]);
+
+      harness.advance(COOLDOWN_MS);
+      await harness.maintain();
+      await harness.maintain();
+      const [raised] = harness.alertsOf('ews');
+      expect(harness.resolvedEvents).toEqual([
+        expect.objectContaining({
+          alertId: raised?.id,
+          type: 'ews',
+          domain: 'safety',
+          severity: 'warning',
+          mmsi: MMSI,
+          relatedMmsi: null,
+          zoneId: zone.id,
+          dedupKey: `ews:${MMSI}:${zone.id}`,
+          methodId: 'ews.pipeline_distance_status',
+          reason: 'safe: not at anchor within the warning distance',
+          data: expect.objectContaining({
+            ewsStatus: 3,
+            messageKey: 'safety.ews.resolved_safe',
+            messageParams: {},
+          }) as unknown,
+        }),
+      ]);
+    });
+
+    it('publishes none when the vessel is warned again within the cooldown', async () => {
+      const { harness } = setup();
+      await harness.zone({ kind: 'pipeline', geometry: LINE });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      harness.advance(MINUTE);
+      await harness.position({ mmsi: MMSI, ...east(1000), ...underWay });
+      harness.advance(MINUTE);
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      expect(harness.alertsOf('ews')).toHaveLength(1);
+      expect(harness.updates.at(-1)).toMatchObject({
+        reason: 'suppressed',
+        reopened: true,
+      });
+
+      harness.advance(COOLDOWN_MS);
+      await harness.maintain();
+      expect(harness.resolvedEvents).toEqual([]);
+      expect(harness.services.alerts.openAlerts()).toHaveLength(1);
+    });
+
+    it('publishes at once for an occurrence older than the cooldown', async () => {
+      const { harness } = setup();
+      await harness.zone({ kind: 'pipeline', geometry: LINE });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      harness.advance(COOLDOWN_MS + MINUTE);
+      await harness.position({ mmsi: MMSI, ...east(1000), ...underWay });
+      expect(harness.resolvedEvents).toHaveLength(1);
+    });
+  });
+
+  describe('standby and activation (failover)', () => {
+    it('leaves zone changes to the active instance and resolves them on activation', async () => {
+      const { harness } = setup();
+      const zone = await harness.zone({ kind: 'pipeline', geometry: LINE });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      expect(harness.services.alerts.openAlerts()).toHaveLength(1);
+
+      // Standing by: another instance is active and acts on the deletion.
+      await harness.deactivate();
+      await harness.removeZone(zone.id);
+      expect(harness.resolutions).toEqual([]);
+
+      // Taking over: the occurrence of the deleted zone ends.
+      await harness.activate();
+      expect(harness.resolutions).toEqual([
+        expect.objectContaining({
+          reason: 'pipeline zone deleted',
+          data: {
+            messageKey: 'safety.ews.resolved_zone_deleted',
+            messageParams: {},
+          },
+        }),
+      ]);
+      expect(harness.services.alerts.openAlerts()).toEqual([]);
+    });
+
+    it('keeps occurrences whose pipeline still applies on activation', async () => {
+      const { harness } = setup();
+      await harness.zone({ kind: 'pipeline', geometry: LINE });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      await harness.deactivate();
+      await harness.activate();
+      expect(harness.resolutions).toEqual([]);
+      expect(harness.services.alerts.openAlerts()).toHaveLength(1);
+    });
+
+    it('ignores vessel changes while standing by', async () => {
+      const { harness } = setup();
+      const ORG_P = '0195f3c4-0000-7000-8000-00000000000a';
+      const ORG_Q = '0195f3c4-0000-7000-8000-00000000000b';
+      await harness.vessel({ mmsi: MMSI, orgId: ORG_P });
+      await harness.zone({ kind: 'pipeline', geometry: LINE, orgId: ORG_P });
+      await harness.position({ mmsi: MMSI, ...east(1000), ...anchored });
+      expect(harness.services.alerts.openAlerts()).toHaveLength(1);
+      await harness.deactivate();
+      await harness.vessel({ mmsi: MMSI, orgId: ORG_Q });
+      expect(harness.resolutions).toEqual([]);
+      await harness.activate();
+      expect(harness.resolutions).toEqual([
+        expect.objectContaining({
+          reason: 'pipeline zone is private to another organization',
+          data: {
+            messageKey: 'safety.ews.resolved_zone_private',
+            messageParams: {},
+          },
+        }),
+      ]);
+    });
   });
 });

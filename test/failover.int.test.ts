@@ -1,9 +1,11 @@
 import {
+  type AlertRaisedV1,
+  type AlertResolvedV1,
   EVENT_TYPES,
-  parseEnvelope,
   subjects,
 } from '@darmawanweb/ais-its-contracts/events';
 import {
+  AlertEmitter,
   destinationPoint,
   makeTestZone,
   toPositionPayload,
@@ -12,12 +14,13 @@ import {
   ZoneIndex,
 } from '@darmawanweb/ais-its-nest/analytics';
 import { type Database, DRIZZLE_DB } from '@darmawanweb/ais-its-nest/db';
-import { EventPublisher, NatsClient } from '@darmawanweb/ais-its-nest/nats';
+import { EventPublisher } from '@darmawanweb/ais-its-nest/nats';
 import { uniqueName, waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import * as schema from '../src/db/schema.js';
+import { alertEnvelopes, alertTypes } from './support/alerts.js';
 import { startTestService, type TestService } from './support/test-service.js';
 
 // A pipeline along 108.40°E (3.55°S–3.45°S), away from the other test files.
@@ -62,10 +65,16 @@ function position(
   };
 }
 
+const RAISED = EVENT_TYPES.ALERT_RAISED;
+const RESOLVED = EVENT_TYPES.ALERT_RESOLVED;
+const keyOf = (mmsi: number) => `ews:${mmsi}:${PIPELINE.id}`;
+
 /**
- * Review finding (high): a standby that takes over must neither raise again
- * what the previous instance raised after the standby booted, nor ignore
- * what that instance resolved meanwhile (`AlertStateSync`).
+ * A standby that takes over must neither raise again what the previous
+ * instance raised after the standby booted, nor ignore what that instance
+ * resolved meanwhile: the kit reloads the open occurrences from `events`
+ * when the instance becomes active, before its first position, and a
+ * graceful stop releases the pin at once.
  */
 describe('failover between two instances of one durable (exclusive consumer)', () => {
   const durablePrefix = `${uniqueName('ha')}-`;
@@ -75,13 +84,9 @@ describe('failover between two instances of one durable (exclusive consumer)', (
   let aClosed = false;
   let db: Database<typeof schema>;
 
-  const alerts = async (service: TestService, mmsi: number) => {
-    const subject = subjects.alert('ews', mmsi);
-    const info = await service.app
-      .get(NatsClient)
-      .manager.streams.info('ALERTS', { subjects_filter: subject });
-    return info.state.subjects?.[subject] ?? 0;
-  };
+  /** Event types on the vessel's alert subject (raises and resolutions). */
+  const published = (service: TestService, mmsi: number) =>
+    alertTypes(service.app, subjects.alert('ews', mmsi));
   const rows = (mmsi: number) =>
     db
       .select()
@@ -128,7 +133,7 @@ describe('failover between two instances of one durable (exclusive consumer)', (
     );
     expect(a.app.get(VesselStateStore).get(RESOLVED_ELSEWHERE)).toBeDefined();
     await waitFor(async () =>
-      (await alerts(a, RESOLVED_ELSEWHERE)) === 1 ? true : undefined,
+      (await published(a, RESOLVED_ELSEWHERE)).length === 1 ? true : undefined,
     );
 
     // B boots as the standby and restores that open alert.
@@ -137,6 +142,8 @@ describe('failover between two instances of one durable (exclusive consumer)', (
     // A closes its pool when it stops: read the table through B.
     db = standby.app.get<unknown, Database<typeof schema>>(DRIZZLE_DB);
     await waitFor(() => standby.app.get(ZoneIndex).has(PIPELINE.id));
+    const emitterB = standby.app.get(AlertEmitter);
+    expect(emitterB.isOpen(keyOf(RESOLVED_ELSEWHERE))).toBe(true);
 
     // A resolves the first condition and raises a second one; B sees neither.
     await a.processed(
@@ -155,11 +162,17 @@ describe('failover between two instances of one durable (exclusive consumer)', (
     expect(
       standby.app.get(VesselStateStore).get(RAISED_ELSEWHERE),
     ).toBeUndefined();
+    // ALERT_COOLDOWN_S=0: A announces its resolution at once.
     await waitFor(async () =>
-      (await alerts(a, RAISED_ELSEWHERE)) === 1 ? true : undefined,
+      (await published(a, RESOLVED_ELSEWHERE)).length === 2 ? true : undefined,
     );
+    await waitFor(async () =>
+      (await published(a, RAISED_ELSEWHERE)).length === 1 ? true : undefined,
+    );
+    expect(emitterB.isOpen(keyOf(RESOLVED_ELSEWHERE))).toBe(true);
+    expect(emitterB.isOpen(keyOf(RAISED_ELSEWHERE))).toBe(false);
 
-    // A stops; B is pinned once A's pinned TTL (3 s) expired.
+    // A stops gracefully and releases the pin: B takes over with its next pull.
     await a.app.close();
     aClosed = true;
     const probe = await publish(
@@ -168,12 +181,16 @@ describe('failover between two instances of one durable (exclusive consumer)', (
     );
     await waitFor(
       () => standby.app.get(VesselStateStore).get(PROBE) !== undefined,
-      {
-        timeoutMs: 60_000,
-        message: 'B took over',
-      },
+      { timeoutMs: 30_000, message: 'B took over' },
     );
     await standby.processed('AIS_POSITION', 'safety-positions', probe);
+
+    // B activated before its first position with A's open occurrences.
+    expect(emitterB.isOpen(keyOf(RESOLVED_ELSEWHERE))).toBe(false);
+    expect(emitterB.get(keyOf(RAISED_ELSEWHERE))).toMatchObject({
+      severity: 'warning',
+      lastOccurredAt: new Date(t0 + 10_000),
+    });
 
     // Both conditions again, on B.
     for (const mmsi of [RESOLVED_ELSEWHERE, RAISED_ELSEWHERE])
@@ -186,19 +203,23 @@ describe('failover between two instances of one durable (exclusive consumer)', (
         ),
       );
 
-    // Resolved elsewhere → raised again (it was missed before the fix).
-    expect(await alerts(standby, RESOLVED_ELSEWHERE)).toBe(2);
+    // Resolved elsewhere → raised again (a new occurrence).
+    expect(await published(standby, RESOLVED_ELSEWHERE)).toEqual([
+      RAISED,
+      RESOLVED,
+      RAISED,
+    ]);
     expect((await rows(RESOLVED_ELSEWHERE)).map((row) => row.status)).toEqual([
       'resolved',
       'open',
     ]);
-    // Raised elsewhere → not raised again, one open row (two before the fix).
-    expect(await alerts(standby, RAISED_ELSEWHERE)).toBe(1);
+    // Raised elsewhere → not raised again, one open row.
+    expect(await published(standby, RAISED_ELSEWHERE)).toEqual([RAISED]);
     expect((await rows(RAISED_ELSEWHERE)).map((row) => row.status)).toEqual([
       'open',
     ]);
 
-    // Under way again: B resolves the occurrence A raised.
+    // Under way again: B resolves the occurrence A raised and announces it once.
     await standby.processed(
       'AIS_POSITION',
       'safety-positions',
@@ -210,15 +231,31 @@ describe('failover between two instances of one durable (exclusive consumer)', (
     expect((await rows(RAISED_ELSEWHERE)).map((row) => row.status)).toEqual([
       'resolved',
     ]);
-
-    const message = await standby.app
-      .get(NatsClient)
-      .manager.streams.getMessage('ALERTS', {
-        last_by_subj: subjects.alert('ews', RESOLVED_ELSEWHERE),
-      });
-    const parsed = parseEnvelope(message?.data);
-    expect(parsed.success && parsed.envelope.type).toBe(
-      EVENT_TYPES.ALERT_RAISED,
-    );
+    const envelopes = await waitFor(async () => {
+      const stored = await alertEnvelopes(
+        standby.app,
+        subjects.alert('ews', RAISED_ELSEWHERE),
+      );
+      return stored.length === 2 ? stored : undefined;
+    });
+    const [raise, resolution] = envelopes;
+    expect(resolution?.type).toBe(RESOLVED);
+    expect(resolution?.data).toMatchObject({
+      alertId: (raise?.data as AlertRaisedV1).id,
+      dedupKey: keyOf(RAISED_ELSEWHERE),
+      type: 'ews',
+      domain: 'safety',
+      severity: 'warning',
+      mmsi: RAISED_ELSEWHERE,
+      zoneId: PIPELINE.id,
+      openedAt: new Date(t0 + 10_000).toISOString(),
+      resolvedAt: new Date(t0 + 40_000).toISOString(),
+      reason: 'safe: not at anchor within the warning distance',
+      methodId: 'ews.pipeline_distance_status',
+      data: expect.objectContaining({
+        messageKey: 'safety.ews.resolved_safe',
+      }) as unknown,
+    } satisfies Partial<Record<keyof AlertResolvedV1, unknown>>);
+    expect(resolution?.id).toBe((resolution?.data as AlertResolvedV1).id);
   });
 });

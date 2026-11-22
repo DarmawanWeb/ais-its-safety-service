@@ -7,7 +7,8 @@ import {
 import type { ClosestEncounter } from '@darmawanweb/ais-its-contracts/events';
 import { ApiProperty } from '@nestjs/swagger';
 
-import type { VesselStateRecord } from '../vessel-state.js';
+import { SafetyVesselIdentityDto } from '../../../common/vessel-identity.dto.js';
+import type { PipelineIdentity, VesselStateRecord } from '../vessel-state.js';
 
 /** The closest predicted encounter of a vessel (contracts `ClosestEncounter`). */
 export class ClosestEncounterDto {
@@ -27,12 +28,15 @@ export class ClosestEncounterDto {
   readonly tcpaMin!: number;
 }
 
-/** Fleet identity of a registered vessel. */
-export class SafetyVesselIdentityDto {
-  @ApiProperty({ format: 'uuid' })
+/** Identity of a pipeline zone (the `zones` projection of `GEO`). */
+export class PipelineIdentityDto implements PipelineIdentity {
+  @ApiProperty({ format: 'uuid', description: 'Zone id' })
   readonly id!: string;
 
-  @ApiProperty({ example: 'KM Bahari Nusantara' })
+  @ApiProperty({ example: 'PL-SBY-01', description: 'Zone code' })
+  readonly code!: string;
+
+  @ApiProperty({ example: 'Pipeline Surabaya West' })
   readonly name!: string;
 }
 
@@ -103,6 +107,14 @@ export class SafetyVesselStateDto {
   })
   readonly nearestPipelineZoneId: string | null;
 
+  @ApiProperty({
+    type: PipelineIdentityDto,
+    nullable: true,
+    description:
+      'Code and name of that pipeline zone (also after it was deleted, until the vessel is evaluated again); `null` under the same conditions as `pipelineDistanceM`, or when the zone is not (yet) in the `zones` projection',
+  })
+  readonly nearestPipeline: PipelineIdentity | null;
+
   @ApiProperty({ enum: COLLISION_RISKS })
   readonly collisionRisk: CollisionRisk;
 
@@ -116,7 +128,12 @@ export class SafetyVesselStateDto {
   })
   readonly methodIds: string[];
 
-  @ApiProperty({ type: SafetyVesselIdentityDto, nullable: true })
+  @ApiProperty({
+    type: SafetyVesselIdentityDto,
+    nullable: true,
+    description:
+      'Fleet identity of the vessel (shared across tenants); `null` for an unregistered MMSI',
+  })
   readonly vessel: VesselStateRecord['vessel'];
 
   @ApiProperty({ format: 'date-time' })
@@ -136,6 +153,7 @@ export class SafetyVesselStateDto {
     this.ewsStatus = record.ewsStatus;
     this.pipelineDistanceM = record.pipelineDistanceM;
     this.nearestPipelineZoneId = record.nearestPipelineZoneId;
+    this.nearestPipeline = record.nearestPipeline;
     this.collisionRisk = record.collisionRisk;
     this.closestEncounter = record.closestEncounter;
     this.methodIds = [...record.methodIds];

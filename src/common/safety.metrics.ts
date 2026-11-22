@@ -1,7 +1,11 @@
 import type { CollisionRisk } from '@darmawanweb/ais-its-contracts/domain';
-import { MetricsService } from '@darmawanweb/ais-its-nest/metrics';
+import {
+  type Counter,
+  type Gauge,
+  type Histogram,
+  MetricsService,
+} from '@darmawanweb/ais-its-nest/metrics';
 import { Injectable } from '@nestjs/common';
-import type { Counter, Gauge, Histogram } from 'prom-client';
 
 import type { PublicationReason } from '../domain/safety-state.js';
 
@@ -29,8 +33,6 @@ export class SafetyMetrics {
   readonly collisionPairs: Gauge<'risk'>;
   /** Projection rebuilds from the compacted streams at startup. */
   readonly projectionRebuilds: Counter<'projection' | 'outcome'>;
-  /** Reloads of the open alerts after an idle gap or a takeover, by outcome. */
-  readonly alertResyncs: Counter<'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.statesPublished = metrics.counter({
@@ -72,11 +74,6 @@ export class SafetyMetrics {
       name: 'safety_projection_rebuilds_total',
       help: 'Projection rebuilds from the compacted GEO / FLEET streams at startup',
       labelNames: ['projection', 'outcome'],
-    });
-    this.alertResyncs = metrics.counter({
-      name: 'safety_alert_resyncs_total',
-      help: 'Reloads of the open alerts from the events table when the instance starts consuming positions (unchanged, changed = another instance was active, failed)',
-      labelNames: ['outcome'],
     });
   }
 

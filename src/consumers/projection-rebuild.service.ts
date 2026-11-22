@@ -6,6 +6,7 @@ import {
   SUBJECT_FILTERS,
 } from '@darmawanweb/ais-its-contracts/events';
 import { InjectConfig } from '@darmawanweb/ais-its-nest';
+import { sanitizeError } from '@darmawanweb/ais-its-nest/db';
 import { OrderedConsumers } from '@darmawanweb/ais-its-nest/nats';
 import {
   Injectable,
@@ -132,9 +133,13 @@ export class ProjectionRebuildService implements OnApplicationBootstrap {
         projection: spec.name,
         outcome: 'failed',
       });
-      this.logger.warn(
-        `Rebuilding the ${spec.name} projection from ${spec.stream} failed (the durable consumer keeps it current): ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // Database errors without bound values (the kit's error hygiene): a
+      // failed `deleteAbsent` would otherwise log every present entity id.
+      const err = sanitizeError(error);
+      this.logger.warn({
+        msg: `Rebuilding the ${spec.name} projection from ${spec.stream} failed (the durable consumer keeps it current): ${err instanceof Error ? err.message : String(err)}`,
+        err,
+      });
     }
   }
 }

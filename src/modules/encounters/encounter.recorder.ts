@@ -1,3 +1,4 @@
+import { sanitizeError } from '@darmawanweb/ais-its-nest/db';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { SafetyMetrics } from '../../common/safety.metrics.js';
@@ -27,9 +28,12 @@ export class EncounterRecorder implements EncounterSink {
         this.metrics.encounterSamples.inc({ risk: sample.risk });
     } catch (error) {
       this.metrics.encounterSampleFailures.inc(samples.length);
-      this.logger.warn(
-        `Storing ${samples.length} encounter sample(s) failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // Database errors without bound values (the kit's error hygiene).
+      const err = sanitizeError(error);
+      this.logger.warn({
+        msg: `Storing ${samples.length} encounter sample(s) failed: ${err instanceof Error ? err.message : String(err)}`,
+        err,
+      });
     }
   }
 }

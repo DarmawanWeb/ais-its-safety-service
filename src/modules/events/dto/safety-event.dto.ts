@@ -8,6 +8,8 @@ import {
 } from '@darmawanweb/ais-its-contracts/domain';
 import { ApiProperty } from '@nestjs/swagger';
 
+import type { VesselIdentity } from '../../../common/vessel-identity.js';
+import { SafetyVesselIdentityDto } from '../../../common/vessel-identity.dto.js';
 import type { EventRecord } from '../events.repository.js';
 
 /**
@@ -65,6 +67,22 @@ export class SafetyEventDto {
   readonly relatedMmsi: number | null;
 
   @ApiProperty({
+    type: SafetyVesselIdentityDto,
+    nullable: true,
+    description:
+      'Fleet identity of `mmsi` (shared across tenants, spec §8.5); `null` for an unregistered MMSI',
+  })
+  readonly vessel: VesselIdentity | null;
+
+  @ApiProperty({
+    type: SafetyVesselIdentityDto,
+    nullable: true,
+    description:
+      'Fleet identity of `relatedMmsi`; `null` without a related vessel or for an unregistered MMSI',
+  })
+  readonly relatedVessel: VesselIdentity | null;
+
+  @ApiProperty({
     type: String,
     format: 'uuid',
     nullable: true,
@@ -97,7 +115,7 @@ export class SafetyEventDto {
     type: 'object',
     additionalProperties: true,
     description:
-      'Detector specific details (distances, thresholds, CPA/TCPA, …)',
+      'Detector specific details (distances, thresholds, CPA/TCPA, …) and the localizable text of the alert: `messageKey` (stable key, README "Localizable texts") with `messageParams` (absent on events stored before 0.2.0)',
   })
   readonly data: Record<string, unknown>;
 
@@ -128,7 +146,8 @@ export class SafetyEventDto {
     type: 'object',
     additionalProperties: true,
     nullable: true,
-    description: 'Why and how it ended (`reason`, last measurements)',
+    description:
+      'Why and how it ended: `reason` (English), the last measurements and the localizable text `messageKey` / `messageParams` (absent on events resolved before 0.2.0)',
   })
   readonly resolution: Record<string, unknown> | null;
 
@@ -143,6 +162,8 @@ export class SafetyEventDto {
     this.status = record.status;
     this.mmsi = record.mmsi;
     this.relatedMmsi = record.relatedMmsi;
+    this.vessel = record.vessel;
+    this.relatedVessel = record.relatedVessel;
     this.zoneId = record.zoneId;
     this.lat = record.lat;
     this.lon = record.lon;

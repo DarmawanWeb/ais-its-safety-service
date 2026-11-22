@@ -22,9 +22,9 @@ export const SAFETY_STATE_NOT_FOUND = 'SAFETY_STATE_NOT_FOUND';
 /**
  * Read side of the vessel safety states. Navigational safety is shared
  * across tenants (spec §8.5): every principal with `safety:read` sees every
- * vessel's state, except the identity and distance of an org-owned pipeline
- * zone, which only that organization and `authority` / `super_admin` see
- * (`null` for everyone else; the EWS status stays shared).
+ * vessel's state, except the identity (id, code, name) and distance of an
+ * org-owned pipeline zone, which only that organization and `authority` /
+ * `super_admin` see (`null` for everyone else; the EWS status stays shared).
  */
 @Injectable()
 export class VesselStatesService {
@@ -68,12 +68,12 @@ export class VesselStatesService {
   }
 }
 
-/** The state without an org-owned pipeline the reader may not see. */
+/** The state without an org-owned pipeline the reader may not see (zone id, identity and distance). */
 function visibleTo(
   scope: SafetyReadScope,
   state: VesselStateRecord,
 ): VesselStateRecord {
   return canSeePipeline(scope, state.nearestPipelineOrgId)
     ? state
-    : hidePipeline(state);
+    : { ...hidePipeline(state), nearestPipeline: null };
 }

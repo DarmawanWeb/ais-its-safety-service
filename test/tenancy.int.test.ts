@@ -46,6 +46,7 @@ interface StateBody {
   mmsi: number;
   ewsStatus: number;
   nearestPipelineZoneId: string | null;
+  nearestPipeline: { id: string; code: string; name: string } | null;
   pipelineDistanceM: number | null;
 }
 
@@ -194,6 +195,7 @@ describe('org-owned pipeline zones (tenancy spec §8.5)', () => {
     expect(owner).toMatchObject({
       ewsStatus: 1,
       nearestPipelineZoneId: PRIVATE.id,
+      nearestPipeline: { id: PRIVATE.id, code: PRIVATE.code },
     });
     expect(owner.pipelineDistanceM).toBeCloseTo(1000, 3);
     const authority = (
@@ -203,6 +205,7 @@ describe('org-owned pipeline zones (tenancy spec §8.5)', () => {
       })
     ).json<StateBody>();
     expect(authority.nearestPipelineZoneId).toBe(PRIVATE.id);
+    expect(authority.nearestPipeline?.name).toBe(PRIVATE.name);
     for (const claims of [
       viewer(ORG_R),
       viewer(ORG_Q),
@@ -214,6 +217,7 @@ describe('org-owned pipeline zones (tenancy spec §8.5)', () => {
       expect(other).toMatchObject({
         ewsStatus: 1,
         nearestPipelineZoneId: null,
+        nearestPipeline: null,
         pipelineDistanceM: null,
       });
       const listed = (
@@ -221,6 +225,7 @@ describe('org-owned pipeline zones (tenancy spec §8.5)', () => {
       ).json<StateBody[]>();
       expect(listed.find((state) => state.mmsi === VP)).toMatchObject({
         nearestPipelineZoneId: null,
+        nearestPipeline: null,
         pipelineDistanceM: null,
       });
     }

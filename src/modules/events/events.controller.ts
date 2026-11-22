@@ -4,11 +4,10 @@ import {
   type Principal,
   RequirePermissions,
 } from '@darmawanweb/ais-its-nest/auth';
-import { ApiCursorResponse } from '@darmawanweb/ais-its-nest/http';
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { ApiCursorResponse, UuidParam } from '@darmawanweb/ais-its-nest/http';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
-import { EventIdParam } from './dto/event-id.param.js';
 import { ListEventsQuery } from './dto/list-events.query.js';
 import { SafetyEventDto } from './dto/safety-event.dto.js';
 import { EventsService } from './events.service.js';
@@ -23,7 +22,7 @@ export class EventsController {
   @ApiOperation({
     summary: 'Safety events (EWS, collision) with their lifecycle',
     description:
-      'Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).',
+      'Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Each event carries the fleet identities of its vessels (`vessel`, `relatedVessel`) and, in `data` / `resolution`, the localizable text (`messageKey`, `messageParams`). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).',
   })
   @ApiCursorResponse(SafetyEventDto)
   async list(
@@ -42,9 +41,9 @@ export class EventsController {
   @ApiOperation({ summary: 'One safety event' })
   @ApiOkResponse({ type: SafetyEventDto })
   async get(
-    @Param() params: EventIdParam,
+    @UuidParam() id: string,
     @CurrentPrincipal() principal: Principal,
   ): Promise<SafetyEventDto> {
-    return new SafetyEventDto(await this.events.get(params.id, principal));
+    return new SafetyEventDto(await this.events.get(id, principal));
   }
 }

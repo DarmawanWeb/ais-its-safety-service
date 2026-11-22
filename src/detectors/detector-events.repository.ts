@@ -14,6 +14,7 @@ import { Injectable } from '@nestjs/common';
 import { and, asc, eq, ne, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.js';
+import { supersededText } from './alert-text.js';
 import { detectorOfAlertType } from './alert-types.js';
 
 const { events } = schema;
@@ -31,26 +32,25 @@ type Transaction = Parameters<
 export const ALERT_KEY_LOCK_CLASS = 0x5afe_0001;
 
 /**
- * Resolution reason of an occurrence that another instance already ended
- * (`AlertStateSync`): the emitter forgets it, {@link DetectorEventsRepository.onResolved}
- * writes nothing.
- */
-export const RESOLVED_ELSEWHERE = 'resolved by another instance';
-
-/**
  * The `events` table as the Detector SDK's persistence hook (spec §18). The
- * emitter calls it BEFORE publishing, so every published alert has a row;
- * each method is idempotent because deliveries and restarts repeat calls.
+ * emitter calls it BEFORE publishing, so every published alert (and every
+ * published resolution) has its row; each method is idempotent because
+ * deliveries, restarts and failovers repeat calls.
  *
  * Invariant: at most one `open` row per `dedup_key`. Every write that opens
  * a row (a new alert, an escalation, a reopened occurrence) runs under a
  * per-key advisory lock and resolves any other open row of the key as
- * superseded — so an instance that took over with a stale alert state (see
- * `AlertStateSync`) can never leave a second open row behind.
+ * superseded. The kit serializes a key within one instance and reloads the
+ * open rows ({@link loadOpen}) whenever an instance becomes the active one;
+ * the database invariant covers what an in-process queue cannot, e.g. an
+ * instance that lost its pin while it was still finishing a position.
  *
- * `last_seen_at` is event time throughout: the alert's `occurredAt` when a
- * row is written, then the sightings of the condition
- * ({@link recordSighting}); a resolution sets `resolved_at` only.
+ * `last_seen_at` is event time throughout and never moves back: the alert's
+ * `occurredAt` when a row is written, then the event time of every later
+ * signal of the condition — de-escalations and reopenings
+ * ({@link onUpdated}) and unchanged repeats ({@link onRepeated}, at most every
+ * `alertRepeatedIntervalMs` = 60 s per key); a resolution sets `resolved_at`
+ * only.
  */
 @Injectable()
 export class DetectorEventsRepository implements AlertPersistence {
@@ -67,6 +67,7 @@ export class DetectorEventsRepository implements AlertPersistence {
       const superseded = await supersede(tx, alert.dedupKey, alert.id, {
         at: occurredAt,
         reason: outcome === 'escalated' ? 'escalated' : 'superseded',
+        detector: detectorOfAlertType(alert.type),
       });
       // The occurrence started with the oldest row it continues.
       let openedAt = occurredAt;
@@ -103,24 +104,28 @@ export class DetectorEventsRepository implements AlertPersistence {
   }
 
   /**
-   * A de-escalation or a suppressed re-raise, which may reopen the row. The
-   * update carries the emitter's wall clock, not the signal's event time,
-   * so `last_seen_at` is left to {@link recordSighting}.
+   * A de-escalation or a suppressed re-raise, which may reopen the row:
+   * the current severity and `last_seen_at` = the signal's event time
+   * (`update.occurredAt`; `update.at` is the emitter's wall clock).
    */
   async onUpdated(update: AlertUpdate): Promise<void> {
-    const { alert } = update;
+    const { alert, occurredAt } = update;
+    // The emitter always sets occurredAt; without it last_seen_at stays as is.
+    const seen =
+      occurredAt === undefined ? {} : { lastSeenAt: seenAtLeast(occurredAt) };
     if (!update.reopened) {
       await this.db
         .update(events)
-        .set({ currentSeverity: alert.severity })
+        .set({ currentSeverity: alert.severity, ...seen })
         .where(eq(events.id, alert.alertId));
       return;
     }
     await this.db.transaction(async (tx) => {
       await lockKey(tx, alert.dedupKey);
       await supersede(tx, alert.dedupKey, alert.alertId, {
-        at: update.at,
+        at: occurredAt ?? update.at,
         reason: 'superseded',
+        detector: alert.detector ?? detectorOfAlertType(alert.type),
       });
       await tx
         .update(events)
@@ -129,18 +134,38 @@ export class DetectorEventsRepository implements AlertPersistence {
           status: 'open',
           resolvedAt: null,
           resolution: null,
+          ...seen,
         })
         .where(eq(events.id, alert.alertId));
     });
   }
 
   /**
-   * Marks the open row of the occurrence resolved (no-op when already
-   * resolved, and for {@link RESOLVED_ELSEWHERE}: that row was resolved by
-   * the instance that ended it).
+   * An unchanged signal of the open occurrence (throttled by the runner's
+   * `alertRepeatedIntervalMs`, 60 s of event time per key): moves
+   * `last_seen_at` forward to `occurredAt`, never back (redeliveries and
+   * the throttle's first signal may be older).
+   */
+  async onRepeated(alert: OpenAlert, occurredAt: Date): Promise<void> {
+    await this.db
+      .update(events)
+      .set({ lastSeenAt: seenAtLeast(occurredAt) })
+      .where(
+        and(
+          // The partial index of open rows (events_open_idx) finds the row.
+          eq(events.dedupKey, alert.dedupKey),
+          eq(events.status, 'open'),
+          eq(events.id, alert.alertId),
+        ),
+      );
+  }
+
+  /**
+   * Marks the open row of the occurrence resolved (no-op when it is already
+   * resolved). The emitter then announces the end with `alert.resolved.v1`
+   * once the key's cooldown since its last raise is over.
    */
   async onResolved(resolution: AlertResolution): Promise<void> {
-    if (resolution.reason === RESOLVED_ELSEWHERE) return;
     await this.db
       .update(events)
       .set({
@@ -154,20 +179,11 @@ export class DetectorEventsRepository implements AlertPersistence {
   }
 
   /**
-   * Records that the open condition `dedupKey` was observed again at
-   * `seenAt` (event time); `last_seen_at` never moves back.
-   */
-  async recordSighting(dedupKey: string, seenAt: Date): Promise<void> {
-    await this.db
-      .update(events)
-      .set({ lastSeenAt: sql`GREATEST(${events.lastSeenAt}, ${seenAt})` })
-      .where(and(eq(events.dedupKey, dedupKey), eq(events.status, 'open')));
-  }
-
-  /**
-   * Open occurrences with their owning detector, restored at startup (and
-   * by `AlertStateSync` after a takeover) so they are not raised again.
-   * Oldest first: should a key still have two open rows, the newest wins.
+   * Open occurrences with their owning detector, domain, method and event
+   * times, restored at startup and reloaded by the runner whenever this
+   * instance becomes the active one (failover), so neither re-raises them
+   * or misses their resolutions. Oldest first: should a key still have two
+   * open rows, the newest wins.
    */
   async loadOpen(): Promise<readonly OpenAlert[]> {
     const rows = await this.db
@@ -188,9 +204,20 @@ export class DetectorEventsRepository implements AlertPersistence {
       // The row is written right before the alert is published.
       publishedAt: row.createdAt,
       lastSeenAt: row.lastSeenAt,
+      // Event times of the occurrence (both columns store signal times).
+      firstOccurredAt: row.openedAt,
+      lastOccurredAt: row.lastSeenAt,
+      // Carried by the occurrence's alert.resolved.v1.
+      domain: row.domain,
+      methodId: row.methodId,
       detector: row.detector,
     }));
   }
+}
+
+/** `last_seen_at` moved forward to `at` (never back). */
+function seenAtLeast(at: Date) {
+  return sql`GREATEST(${events.lastSeenAt}, ${at})`;
 }
 
 /** Serializes, until the transaction ends, the writes that open a row of `dedupKey`. */
@@ -205,14 +232,23 @@ function supersede(
   tx: Transaction,
   dedupKey: string,
   keepId: string,
-  resolution: { readonly at: Date; readonly reason: string },
+  resolution: {
+    readonly at: Date;
+    readonly reason: 'escalated' | 'superseded';
+    /** Detector of the key (the text's `messageKey`). */
+    readonly detector: string;
+  },
 ): Promise<{ openedAt: Date }[]> {
   return tx
     .update(events)
     .set({
       status: 'resolved',
       resolvedAt: resolution.at,
-      resolution: { reason: resolution.reason, supersededBy: keepId },
+      resolution: {
+        reason: resolution.reason,
+        supersededBy: keepId,
+        ...supersededText(resolution.detector, resolution.reason),
+      },
     })
     .where(
       and(

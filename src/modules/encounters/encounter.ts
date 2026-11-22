@@ -1,5 +1,9 @@
-import type { CollisionRisk } from '@darmawanweb/ais-its-contracts/domain';
+import type {
+  BBox,
+  CollisionRisk,
+} from '@darmawanweb/ais-its-contracts/domain';
 
+import type { VesselIdentity } from '../../common/vessel-identity.js';
 import type { EncounterPositionsJson } from '../../db/schema.js';
 
 /** One CPA/TCPA evaluation of a vessel pair at risk (`encounters` row). */
@@ -45,6 +49,10 @@ export interface EncounterRecord {
   readonly mmsiA: number;
   /** The higher MMSI of the pair. */
   readonly mmsiB: number;
+  /** Fleet identity of `mmsiA` (shared across tenants, spec §8.5); `null` when unregistered. */
+  readonly vesselA: VesselIdentity | null;
+  /** Fleet identity of `mmsiB`; `null` when unregistered. */
+  readonly vesselB: VesselIdentity | null;
   /** Time of the first sample in the range. */
   readonly startedAt: Date;
   /** Time of the latest sample in the range. */
@@ -77,7 +85,45 @@ export interface EncounterFilter {
   /** Either vessel of the pair. */
   readonly mmsi?: number | undefined;
   readonly encounterId?: string | undefined;
+  /**
+   * Only encounters with a sample in the range where either vessel's report
+   * lies in the box (`[minLon, minLat, maxLon, maxLat]`).
+   */
+  readonly bbox?: BBox | undefined;
+  /**
+   * Only active (`active: true`) or only ended (`false`) encounters: an
+   * encounter is active while it holds the latest sample of its pair at or
+   * after `since` and that sample has a band above `none`
+   * ({@link activeEncounterWindowMs}; `since` is in event time). An
+   * encounter followed by a newer one of the same pair has ended.
+   */
+  readonly activity?:
+    { readonly active: boolean; readonly since: Date } | undefined;
   /** Keyset position after which to continue. */
   readonly after?: EncounterPosition | undefined;
   readonly limit: number;
+}
+
+/** Interval of the collision detector's housekeeping tick (`COLLISION_TICK_MS`), s. */
+const HOUSEKEEPING_TICK_S = 30;
+
+/**
+ * How long after its latest sample an encounter still counts as active, ms
+ * of event time (measured back from the collision detector's newest
+ * evaluation, not from the wall clock): the detector stores a sample of an
+ * unchanged band at least every `COLLISION_SAMPLE_INTERVAL_S` while the pair
+ * is evaluated, and closes a pair not evaluated for `COLLISION_MAX_AGE_S` of
+ * event time at its next housekeeping tick (30 s). A pair still tracked
+ * therefore has a sample within the sum, and an encounter ended by a band
+ * back to `none` has a `none` sample at its end. Encounters closed without a
+ * measurement (a vessel excluded or out of range) stay active until the
+ * window passes.
+ */
+export function activeEncounterWindowMs(config: {
+  readonly MAX_AGE_S: number;
+  readonly SAMPLE_INTERVAL_S: number;
+}): number {
+  return (
+    (config.MAX_AGE_S + config.SAMPLE_INTERVAL_S + HOUSEKEEPING_TICK_S) * 1000
+  );
 }

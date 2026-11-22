@@ -5,7 +5,15 @@ import type {
 } from '@darmawanweb/ais-its-contracts/domain';
 import type { ClosestEncounter } from '@darmawanweb/ais-its-contracts/events';
 
+import type { VesselIdentity } from '../../common/vessel-identity.js';
 import type { VesselKinematics } from '../../domain/safety-state.js';
+
+/** Identity of a pipeline zone (the `zones` projection of `GEO`). */
+export interface PipelineIdentity {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+}
 
 /** The latest safety state of a vessel as the REST API returns it. */
 export interface VesselStateRecord {
@@ -17,13 +25,15 @@ export interface VesselStateRecord {
   readonly ewsStatus: EwsStatus;
   readonly pipelineDistanceM: number | null;
   readonly nearestPipelineZoneId: string | null;
+  /** Code and name of that zone; `null` without one or when the projection lacks it. */
+  readonly nearestPipeline: PipelineIdentity | null;
   /** Owner of the nearest pipeline zone, `null` = global (decides who sees it, spec §8.5). */
   readonly nearestPipelineOrgId: string | null;
   readonly collisionRisk: CollisionRisk;
   readonly closestEncounter: ClosestEncounter | null;
   readonly methodIds: readonly string[];
   /** Fleet identity (shared across tenants, spec §8.5); `null` for unregistered vessels. */
-  readonly vessel: { readonly id: string; readonly name: string } | null;
+  readonly vessel: VesselIdentity | null;
   readonly updatedAt: Date;
 }
 

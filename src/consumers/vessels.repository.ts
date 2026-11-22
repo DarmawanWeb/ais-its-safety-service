@@ -2,12 +2,15 @@ import type {
   VesselDeletedV1,
   VesselSnapshotV1,
 } from '@darmawanweb/ais-its-contracts/events';
-import { type Database, InjectDb } from '@darmawanweb/ais-its-nest/db';
+import {
+  type Database,
+  InjectDb,
+  isUniqueViolation,
+} from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { and, eq, isNull, lt, lte, ne, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.js';
-import { isUniqueViolation } from '../db/errors.js';
 
 const { vessels } = schema;
 

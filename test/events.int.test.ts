@@ -6,6 +6,7 @@ import {
 import {
   destinationPoint,
   makeTestZone,
+  type OpenAlert,
   toPositionPayload,
   ZoneIndex,
 } from '@darmawanweb/ais-its-nest/analytics';
@@ -16,10 +17,7 @@ import { asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import * as schema from '../src/db/schema.js';
-import {
-  DetectorEventsRepository,
-  RESOLVED_ELSEWHERE,
-} from '../src/detectors/detector-events.repository.js';
+import { DetectorEventsRepository } from '../src/detectors/detector-events.repository.js';
 import { EncountersRepository } from '../src/modules/encounters/encounters.repository.js';
 import { startTestService, type TestService } from './support/test-service.js';
 
@@ -78,11 +76,12 @@ describe('events and encounters (review findings: invariant, event time, windows
     const mmsi = 525_830_001;
     const dedupKey = `ews:${mmsi}:${newId()}`;
     const t0 = new Date(Date.now() - 30 * MINUTE);
+    const at = (minutes: number) => new Date(t0.getTime() + minutes * MINUTE);
     const first = alert({ dedupKey, mmsi, occurredAt: t0.toISOString() });
     const stale = alert({
       dedupKey,
       mmsi,
-      occurredAt: new Date(t0.getTime() + MINUTE).toISOString(),
+      occurredAt: at(1).toISOString(),
     });
     await repository.onRaised(first, 'raised');
     // An instance with a stale alert state raises the same condition again.
@@ -95,67 +94,92 @@ describe('events and encounters (review findings: invariant, event time, windows
     expect(rows[0]?.resolution).toEqual({
       reason: 'superseded',
       supersededBy: stale.id,
+      messageKey: 'safety.ews.superseded',
+      messageParams: {},
     });
     expect(rows[1]?.openedAt).toEqual(t0);
 
-    // Reopening the first one (a suppressed re-raise) supersedes the other.
+    // Reopening the first one (a suppressed re-raise) supersedes the other;
+    // last_seen_at takes the signal's event time, not the emitter clock.
+    const reopened: OpenAlert = {
+      alertId: first.id,
+      dedupKey,
+      type: 'ews',
+      mmsi,
+      relatedMmsi: null,
+      zoneId: null,
+      severity: 'warning',
+      publishedSeverity: 'warning',
+      openedAt: t0,
+      publishedAt: t0,
+      lastSeenAt: t0,
+      detector: 'ews',
+    };
     await repository.onUpdated({
       reason: 'suppressed',
       reopened: true,
       previousSeverity: 'warning',
       at: new Date(),
-      alert: {
-        alertId: first.id,
-        dedupKey,
-        type: 'ews',
-        mmsi,
-        relatedMmsi: null,
-        zoneId: null,
-        severity: 'warning',
-        publishedSeverity: 'warning',
-        openedAt: t0,
-        publishedAt: t0,
-        lastSeenAt: t0,
-        detector: 'ews',
-      },
+      occurredAt: at(3),
+      alert: reopened,
     });
     rows = await rowsOf(mmsi);
     expect(rows.map((row) => row.status)).toEqual(['open', 'resolved']);
-    expect(rows[1]?.resolution).toMatchObject({ supersededBy: first.id });
-
-    // A resolution learnt from another instance writes nothing.
-    await repository.onResolved({
-      alert: {
-        alertId: first.id,
-        dedupKey,
-        type: 'ews',
-        mmsi,
-        relatedMmsi: null,
-        zoneId: null,
-        severity: 'warning',
-        publishedSeverity: 'warning',
-        openedAt: t0,
-        publishedAt: t0,
-        lastSeenAt: t0,
-      },
-      resolvedAt: new Date(),
-      reason: RESOLVED_ELSEWHERE,
-      data: {},
+    expect(rows[0]?.lastSeenAt).toEqual(at(3));
+    expect(rows[1]?.resolution).toMatchObject({
+      reason: 'superseded',
+      supersededBy: first.id,
     });
-    expect((await rowsOf(mmsi))[0]?.status).toBe('open');
+    expect(rows[1]?.resolvedAt).toEqual(at(3));
 
-    // Sightings never move last_seen_at back.
-    await repository.recordSighting(
-      dedupKey,
-      new Date(t0.getTime() + 5 * MINUTE),
+    // Repeats (onRepeated) and de-escalations never move last_seen_at back.
+    await repository.onRepeated(reopened, at(5));
+    await repository.onRepeated(reopened, at(2));
+    await repository.onUpdated({
+      reason: 'de-escalated',
+      reopened: false,
+      previousSeverity: 'critical',
+      at: new Date(),
+      occurredAt: at(4),
+      alert: reopened,
+    });
+    expect((await rowsOf(mmsi))[0]?.lastSeenAt).toEqual(at(5));
+
+    // loadOpen returns the occurrence with its event times, domain and method.
+    const open = (await repository.loadOpen()).filter(
+      (row) => row.dedupKey === dedupKey,
     );
-    await repository.recordSighting(
-      dedupKey,
-      new Date(t0.getTime() + 2 * MINUTE),
-    );
-    expect((await rowsOf(mmsi))[0]?.lastSeenAt).toEqual(
-      new Date(t0.getTime() + 5 * MINUTE),
-    );
+    expect(open).toEqual([
+      expect.objectContaining({
+        alertId: first.id,
+        detector: 'ews',
+        domain: 'safety',
+        methodId: 'ews.pipeline_distance_status',
+        firstOccurredAt: t0,
+        lastOccurredAt: at(5),
+      }),
+    ]);
+
+    // The resolution closes the open row once (a repeat is a no-op).
+    const resolution = {
+      alert: reopened,
+      resolvedAt: at(6),
+      reason: 'safe: not at anchor within the warning distance',
+      data: { messageKey: 'safety.ews.resolved_safe', messageParams: {} },
+    };
+    await repository.onResolved(resolution);
+    await repository.onResolved({ ...resolution, resolvedAt: at(7) });
+    rows = await rowsOf(mmsi);
+    expect(rows.map((row) => row.status)).toEqual(['resolved', 'resolved']);
+    expect(rows[0]).toMatchObject({
+      resolvedAt: at(6),
+      lastSeenAt: at(5),
+      resolution: {
+        reason: 'safe: not at anchor within the warning distance',
+        messageKey: 'safety.ews.resolved_safe',
+        messageParams: {},
+      },
+    });
   });
 
   it('keeps last_seen_at in event time while the condition lasts', async () => {
@@ -329,5 +353,80 @@ describe('events and encounters (review findings: invariant, event time, windows
       expect(seen.filter((item) => item === id)).toHaveLength(1);
     const mine = seen.filter((item) => ids.includes(item));
     expect(mine).toEqual([...ids].reverse());
+  });
+
+  it('filters active encounters: latest sample at risk and recent (event time)', async () => {
+    const encounters = service.app.get(EncountersRepository);
+    const now = Date.now();
+    const at = (secondsAgo: number) => new Date(now - secondsAgo * 1000);
+    const pair = (index: number) => 525_860_001 + index * 2;
+    const report = (mmsi: number, time: Date, lon: number) => ({
+      mmsi,
+      time: time.toISOString(),
+      lat: -1.2,
+      lon,
+      sog: 10,
+      cog: 90,
+    });
+    const encounter = (
+      index: number,
+      samples: readonly [secondsAgo: number, risk: 'medium' | 'none'][],
+    ) => {
+      const mmsiA = pair(index);
+      const encounterId = newId();
+      return samples.map(([secondsAgo, risk]) => ({
+        time: at(secondsAgo),
+        mmsiA,
+        mmsiB: mmsiA + 1,
+        encounterId,
+        cpaNm: 0.3,
+        tcpaMin: risk === 'none' ? -1 : 8,
+        rangeNm: 1.5,
+        risk,
+        positions: {
+          a: report(mmsiA, at(secondsAgo), 106.3),
+          b: report(mmsiA + 1, at(secondsAgo), 106.32),
+        },
+      }));
+    };
+    const ongoing = encounter(0, [
+      [400, 'medium'],
+      [20, 'medium'],
+    ]);
+    const stale = encounter(1, [[600, 'medium']]);
+    const ended = encounter(2, [
+      [90, 'medium'],
+      [20, 'none'],
+    ]);
+    await encounters.insert([...ongoing, ...stale, ...ended]);
+    const ids = (samples: readonly { encounterId: string }[]) =>
+      samples[0]?.encounterId;
+    const listed = async (query: string) =>
+      (
+        await get(
+          `/api/v2/safety/encounters?bbox=106.2,-1.3,106.4,-1.1&from=${at(3600).toISOString()}&${query}`,
+        )
+      ).json<{
+        data: { encounterId: string }[];
+        page: { nextCursor: string | null };
+      }>();
+
+    expect(
+      (await listed('active=true')).data.map((e) => e.encounterId),
+    ).toEqual([ids(ongoing)]);
+    expect(
+      (await listed('active=false')).data.map((e) => e.encounterId).sort(),
+    ).toEqual([ids(stale), ids(ended)].sort());
+    expect((await listed('')).data).toHaveLength(3);
+
+    // Pages of a filtered list keep the first page's cut-off in the cursor.
+    const first = await listed('active=false&limit=1');
+    expect(first.data).toHaveLength(1);
+    const second = await listed(
+      `active=false&limit=1&cursor=${first.page.nextCursor ?? ''}`,
+    );
+    expect(
+      [...first.data, ...second.data].map((e) => e.encounterId).sort(),
+    ).toEqual([ids(stale), ids(ended)].sort());
   });
 });

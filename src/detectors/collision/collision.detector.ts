@@ -31,8 +31,13 @@ import {
   SAFETY_STATE_SINK,
   type SafetyStateSink,
 } from '../../modules/vessel-states/safety-state.sink.js';
-import { ALERT_SIGHTINGS, type AlertSightingSink } from '../alert-sightings.js';
-import { DETECTOR_GATE, type DetectorGate } from '../alert-state-sync.js';
+import {
+  type LocalizableText,
+  localizable,
+  MESSAGE_KEYS,
+  metresOfNm,
+  rounded,
+} from '../alert-text.js';
 import { COLLISION_ALERT_TYPE } from '../alert-types.js';
 import { kinematicsOf, vesselLabel } from '../vessel-kinematics.js';
 import {
@@ -53,6 +58,12 @@ import {
 function fixed(value: number, digits: number): string {
   const factor = 10 ** digits;
   return (Math.round(value * factor) / factor || 0).toFixed(digits);
+}
+
+/** How a pair's occurrence ends when it is closed without a new measurement. */
+interface PairEnd {
+  readonly reason: string;
+  readonly text: LocalizableText;
 }
 
 /** Interval of the housekeeping tick (stale pairs, orphaned alerts), ms. */
@@ -127,8 +138,11 @@ function riskOfSeverity(
  * Positions of one vessel are handled in order, different vessels
  * concurrently: every decision reads the tracker state at the time it is
  * made, and alert operations of one key are serialized by the emitter. The
- * tracker starts over when another instance was active meanwhile
- * (`AlertStateSync`), seeded by the open alerts like after a restart.
+ * tracker starts over whenever this instance becomes the active one
+ * (`onActivated`, after the runner reloaded the open alerts from `events`),
+ * seeded by the open alerts like after a restart. Resolutions are announced
+ * with `alert.resolved.v1` by the runner (after the alert cooldown since the
+ * last raise).
  *
  * @method collision.cpa_tcpa
  * @see docs/METHODOLOGY.md §6.1 (`collision.cpa_tcpa`)
@@ -147,44 +161,48 @@ export class CollisionDetector implements Detector<CollisionConfig> {
   private readonly tracker = new EncounterTracker();
   /** Per vessel: event time of its last collision report (kept monotonic). */
   private readonly reportedAt = new Map<number, number>();
-  /** Per open alert key: event time of the pair's last evaluation. */
-  private readonly evaluatedAt = new Map<string, number>();
   /**
-   * Event time of the first position since the start (or the last reset):
-   * the grace period of restored alerts whose pair is not evaluated again.
+   * Event time of the first position of this active period: the grace
+   * period of restored alerts whose pair is not evaluated again (their
+   * `lastOccurredAt` may lie before an outage).
    */
-  private firstEventTime: number | undefined;
+  private activeSince: number | undefined;
 
   constructor(
     @Inject(SAFETY_STATE_SINK) private readonly states: SafetyStateSink,
     @Inject(ENCOUNTER_SINK) private readonly encounters: EncounterSink,
     private readonly metrics: SafetyMetrics,
-    @Inject(DETECTOR_GATE) private readonly gate: DetectorGate,
-    @Inject(ALERT_SIGHTINGS) private readonly sightings: AlertSightingSink,
-  ) {
-    gate.onReset(() => {
-      this.tracker.clear();
-      this.reportedAt.clear();
-      this.evaluatedAt.clear();
-      this.firstEventTime = undefined;
-    });
-  }
+  ) {}
 
   onPosition(
     context: DetectorContext<CollisionConfig>,
     position: VesselPosition,
   ): Promise<void> {
-    return this.gate.position(() => this.evaluate(context, position));
+    return this.evaluate(context, position);
   }
 
   /**
-   * Housekeeping in event time: closes pairs not evaluated within
-   * `COLLISION_MAX_AGE_S` (neither vessel reported) and resolves open alerts
-   * whose pair was not evaluated within that window (restored at startup or
-   * after a takeover, or left open by a failed resolution).
+   * This instance became the active one (startup or failover; the runner
+   * reloaded the open alerts first): the pair tracker starts over, so pairs
+   * another instance followed meanwhile get new encounters, seeded by the
+   * open alerts' severities.
+   */
+  onActivated(): void {
+    this.tracker.clear();
+    this.reportedAt.clear();
+    this.activeSince = undefined;
+    this.metrics.trackedPairs(this.tracker.counts());
+  }
+
+  /**
+   * Housekeeping in event time (only on the active instance): closes pairs
+   * not evaluated within `COLLISION_MAX_AGE_S` (neither vessel reported) and
+   * resolves open alerts whose pair is not tracked and whose last signal
+   * (`OpenAlert.lastOccurredAt`) is older than that window (restored at
+   * startup or after a takeover, or left open by a failed resolution).
    */
   onTick(context: DetectorContext<CollisionConfig>): Promise<void> {
-    return this.gate.run(() => this.housekeeping(context));
+    return this.housekeeping(context);
   }
 
   private async evaluate(
@@ -192,7 +210,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
     position: VesselPosition,
   ): Promise<void> {
     const { config } = context;
-    this.firstEventTime ??= position.time.getTime();
+    this.activeSince ??= position.time.getTime();
     const before = new Map<number, VesselCollisionSummary>();
     const remember = (mmsi: number): void => {
       if (!before.has(mmsi)) before.set(mmsi, this.tracker.summaryOf(mmsi));
@@ -214,11 +232,6 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         const key = collisionDedupKey(position.mmsi, other.mmsi);
         evaluated.add(key);
         remember(other.mmsi);
-        if (context.alerts.isOpen(key))
-          this.evaluatedAt.set(
-            key,
-            Math.max(position.time.getTime(), this.evaluatedAt.get(key) ?? 0),
-          );
         const tracked = this.tracker.get(key);
         const measurement = {
           ...measurePair(position, other),
@@ -252,15 +265,26 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       transitions.push(closed);
     }
 
-    const reason =
+    const end: PairEnd =
       ownExclusion === null
-        ? 'pair left the search radius, stopped reporting or was excluded'
-        : `vessel ${position.mmsi} excluded (${ownExclusion})`;
-    await this.settle(context, transitions, position.time, reason);
+        ? {
+            reason:
+              'pair left the search radius, stopped reporting or was excluded',
+            text: localizable(MESSAGE_KEYS.collisionResolvedPairLost),
+          }
+        : {
+            reason: `vessel ${position.mmsi} excluded (${ownExclusion})`,
+            text: localizable(MESSAGE_KEYS.collisionResolvedExcluded, {
+              mmsi: position.mmsi,
+              exclusion: ownExclusion,
+            }),
+          };
+    await this.settle(context, transitions, position.time, end);
     for (const key of orphans) {
       await context.alerts.resolve(key, {
         at: position.time,
         reason: 'no collision risk',
+        data: { ...localizable(MESSAGE_KEYS.collisionResolvedNoRisk) },
       });
     }
     this.report(context, before, position.time, position);
@@ -281,27 +305,26 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       const closed = this.tracker.close(stale.key);
       if (closed !== undefined) transitions.push(closed);
     }
-    await this.settle(
-      context,
-      transitions,
-      eventTime,
-      `not evaluated for ${context.config.MAX_AGE_S} s`,
-    );
+    await this.settle(context, transitions, eventTime, {
+      reason: `not evaluated for ${context.config.MAX_AGE_S} s`,
+      text: localizable(MESSAGE_KEYS.collisionResolvedStale, {
+        maxAgeS: context.config.MAX_AGE_S,
+      }),
+    });
 
-    // Event time against event time (OpenAlert.lastSeenAt is the emitter's wall clock).
-    const graceStart = this.firstEventTime ?? eventTime.getTime();
+    // Event time against event time: lastOccurredAt is the event time of the
+    // occurrence's latest signal (lastSeenAt would be the emitter's wall clock).
+    const graceStart = this.activeSince ?? eventTime.getTime();
     for (const open of context.alerts.open()) {
       if (this.tracker.has(open.dedupKey)) continue;
-      if ((this.evaluatedAt.get(open.dedupKey) ?? graceStart) >= cutoff)
-        continue;
+      const lastSignal = (open.lastOccurredAt ?? open.openedAt).getTime();
+      if (Math.max(lastSignal, graceStart) >= cutoff) continue;
       await context.alerts.resolve(open.dedupKey, {
         at: eventTime,
         reason: 'pair no longer evaluated',
+        data: { ...localizable(MESSAGE_KEYS.collisionResolvedNotEvaluated) },
       });
     }
-    for (const [key, at] of this.evaluatedAt)
-      if (at < cutoff && !context.alerts.isOpen(key))
-        this.evaluatedAt.delete(key);
     this.report(context, before, eventTime);
     for (const [mmsi, at] of this.reportedAt)
       if (at < cutoff && this.tracker.keysOf(mmsi).length === 0)
@@ -314,7 +337,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
     context: DetectorContext<CollisionConfig>,
     transitions: readonly EncounterTransition[],
     at: Date,
-    closeReason: string,
+    close: PairEnd,
   ): Promise<void> {
     for (const transition of transitions) {
       const severityAfter = collisionRiskAlertSeverity(transition.after);
@@ -331,29 +354,33 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       const severity =
         current === undefined ? null : collisionRiskAlertSeverity(current.risk);
       if (current !== undefined && severity !== null) {
-        const signal = this.signal(context, current, severity);
-        const outcome = await context.alerts.raise(signal);
-        await this.sightings.record(
-          signal.dedupKey,
-          signal.occurredAt,
-          outcome,
-        );
+        await context.alerts.raise(this.signal(context, current, severity));
       } else {
         const measurement = transition.measurement;
+        const risk = current?.risk ?? 'none';
         await context.alerts.resolve(transition.key, {
           at,
           reason:
             measurement === undefined
-              ? closeReason
-              : `risk ${current?.risk ?? 'none'} (CPA ${fixed(measurement.cpaNm, 2)} nm, TCPA ${measurement.tcpaMin === null ? 'n/a' : `${fixed(measurement.tcpaMin, 1)} min`})`,
+              ? close.reason
+              : `risk ${risk} (CPA ${fixed(measurement.cpaNm, 2)} nm, TCPA ${measurement.tcpaMin === null ? 'n/a' : `${fixed(measurement.tcpaMin, 1)} min`})`,
           data:
             measurement === undefined
-              ? { risk: 'none' }
+              ? { risk: 'none', ...close.text }
               : {
-                  risk: current?.risk ?? 'none',
+                  risk,
                   cpaNm: measurement.cpaNm,
                   tcpaMin: measurement.tcpaMin,
                   rangeNm: measurement.rangeNm,
+                  ...localizable(MESSAGE_KEYS.collisionResolvedRisk, {
+                    risk,
+                    cpaM: metresOfNm(measurement.cpaNm),
+                    cpaNm: rounded(measurement.cpaNm, 2),
+                    // Absent without relative motion (the text says "n/a").
+                    ...(measurement.tcpaMin === null
+                      ? {}
+                      : { tcpaMin: rounded(measurement.tcpaMin, 1) }),
+                  }),
                 },
         });
       }
@@ -443,6 +470,18 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         encounterId: encounter.encounterId,
         thresholds: { ...bands, hysteresis: context.config.HYSTERESIS },
         positions: measurement.positions,
+        ...localizable(MESSAGE_KEYS.collisionRisk, {
+          vesselA: labelA,
+          mmsiA: a.mmsi,
+          vesselB: labelB,
+          mmsiB: b.mmsi,
+          risk: encounter.risk,
+          cpaM: metresOfNm(measurement.cpaNm),
+          cpaNm: rounded(measurement.cpaNm, 2),
+          tcpaMin: rounded(measurement.tcpaMin, 1),
+          rangeM: metresOfNm(measurement.rangeNm),
+          rangeNm: rounded(measurement.rangeNm, 2),
+        }),
       },
     } as const;
   }

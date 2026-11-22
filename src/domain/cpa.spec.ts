@@ -6,6 +6,7 @@ import {
   isCogAvailable,
   isSogAvailable,
   type MotionState,
+  predictedCpaPositions,
   relativePositionNm,
   velocityKn,
 } from './cpa.js';
@@ -130,5 +131,53 @@ describe('AIS availability', () => {
     expect(isCogAvailable(360)).toBe(false);
     expect(isCogAvailable(359.9)).toBe(true);
     expect(isCogAvailable(Number.NaN)).toBe(false);
+  });
+});
+
+describe('predictedCpaPositions (collision.cpa_tcpa)', () => {
+  const T = new Date('2026-01-01T00:00:00.000Z');
+  const timed = (state: MotionState, secondsAfterT = 0) => ({
+    ...state,
+    time: new Date(T.getTime() + secondsAfterT * 1000),
+  });
+
+  it('meets at the crossing point of a collision course', () => {
+    // A northwards from (0, 0), B westwards from (2, 2), 12 kn each: both at (0, 2) after 10 min.
+    const a = timed(at(0, 0, 12, 0));
+    const b = timed(at(2, 2, 12, 270));
+    const { tcpaMin } = computeCpaTcpa(a, b);
+    const positions = predictedCpaPositions(a, b, T, tcpaMin);
+    expect(tcpaMin).toBeCloseTo(10, 9);
+    expect(positions?.a.lat).toBeCloseTo(2 / 60, 6);
+    expect(positions?.a.lon).toBeCloseTo(0, 6);
+    expect(positions?.b.lat).toBeCloseTo(2 / 60, 6);
+    expect(positions?.b.lon).toBeCloseTo(0, 6);
+  });
+
+  it('dead-reckons each report from its own time to the CPA instant', () => {
+    // B reported 30 s before the evaluation: it moves 30 s longer.
+    const a = timed(at(0, 0, 12, 0));
+    const b = timed(at(2.1, 2, 12, 270), -30);
+    const aligned = { ...deadReckon(b, 0.5), sogKn: 12, cogDeg: 270 };
+    const { cpaNm, tcpaMin } = computeCpaTcpa(a, aligned);
+    const positions = predictedCpaPositions(a, b, T, tcpaMin);
+    expect(positions).toBeDefined();
+    // The predicted points are the CPA apart (equator plane: 1 nm = 1/60°).
+    const dx = ((positions?.b.lon ?? 0) - (positions?.a.lon ?? 0)) * 60;
+    const dy = ((positions?.b.lat ?? 0) - (positions?.a.lat ?? 0)) * 60;
+    expect(Math.hypot(dx, dy)).toBeCloseTo(cpaNm, 5);
+  });
+
+  it('has none without relative motion, for a past CPA or without SOG/COG', () => {
+    const a = timed(at(0, 0, 10, 0));
+    const b = timed(at(1, 0, 10, 0));
+    expect(predictedCpaPositions(a, b, T, null)).toBeUndefined();
+    expect(predictedCpaPositions(a, b, T, -2)).toBeUndefined();
+    expect(
+      predictedCpaPositions(a, { ...b, sogKn: 102.3 }, T, 5),
+    ).toBeUndefined();
+    expect(
+      predictedCpaPositions(a, { ...b, cogDeg: 360 }, T, 5),
+    ).toBeUndefined();
   });
 });

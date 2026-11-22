@@ -1,4 +1,5 @@
 import {
+  type BBox,
   COLLISION_RISKS,
   type CollisionRisk,
 } from '@darmawanweb/ais-its-contracts/domain';
@@ -12,6 +13,9 @@ import {
   gte,
   inArray,
   lt,
+  max,
+  ne,
+  notInArray,
   or,
   type SQL,
   sql,
@@ -19,6 +23,7 @@ import {
 
 import { scopeCondition } from '../../common/tenancy.sql.js';
 import type { SafetyReadScope } from '../../common/tenancy.js';
+import { vesselIdentities } from '../../common/vessel-identity.js';
 import * as schema from '../../db/schema.js';
 import type {
   EncounterFilter,
@@ -27,7 +32,7 @@ import type {
   EncounterSample,
 } from './encounter.js';
 
-const { encounters } = schema;
+const { encounters, vesselState } = schema;
 
 /** Rank of a band (`none` 0 … `high` 3), the order of contracts `COLLISION_RISKS`. */
 const riskRank = (risk: CollisionRisk): number => COLLISION_RISKS.indexOf(risk);
@@ -43,6 +48,15 @@ const RISK_RANK_SQL = sql`CASE ${encounters.risk} ${sql.join(
 const PEAK_RANK = sql<number>`max(${RISK_RANK_SQL})`;
 const LAST_SAMPLE_AT = sql`max(${encounters.time})`;
 
+/** `true` when the report `side` (`a` or `b`) of a sample lies in the box (lon/lat space, like `?bbox` elsewhere). */
+function reportInBBox(
+  side: 'a' | 'b',
+  [minLon, minLat, maxLon, maxLat]: BBox,
+): SQL {
+  const report = sql`${encounters.positions} -> ${sql.raw(`'${side}'`)}`;
+  return sql`((${report} ->> 'lon')::float8 BETWEEN ${minLon} AND ${maxLon} AND (${report} ->> 'lat')::float8 BETWEEN ${minLat} AND ${maxLat})`;
+}
+
 /** The band of a rank computed by {@link RISK_RANK_SQL}. */
 function riskOfRank(rank: number): CollisionRisk {
   return COLLISION_RISKS[rank] ?? 'none';
@@ -52,6 +66,21 @@ function riskOfRank(rank: number): CollisionRisk {
 @Injectable()
 export class EncountersRepository {
   constructor(@InjectDb() private readonly db: Database<typeof schema>) {}
+
+  /**
+   * The collision detector's event clock as stored: the newest
+   * `vessel_state.collision_evaluated_at`, i.e. the AIS time of the newest
+   * position the detector evaluated (every evaluation reports the vessel's
+   * collision state, written every `SAFETY_STATE_FLUSH_MS`). Shared by every
+   * instance and deployment of the schema; `undefined` before the first
+   * evaluation. Index `vessel_state_collision_evaluated_idx` (`0003`).
+   */
+  async collisionClock(): Promise<Date | undefined> {
+    const [row] = await this.db
+      .select({ at: max(vesselState.collisionEvaluatedAt) })
+      .from(vesselState);
+    return row?.at ?? undefined;
+  }
 
   /** Inserts samples; a repeated sample (same pair and time) is ignored. */
   async insert(samples: readonly EncounterSample[]): Promise<void> {
@@ -101,6 +130,51 @@ export class EncountersRepository {
       );
     if (filter.encounterId !== undefined)
       conditions.push(eq(encounters.encounterId, filter.encounterId));
+    // Conditions on the encounter as a whole (subqueries on its id), so the
+    // aggregates below still cover all of its samples in the range.
+    if (filter.bbox !== undefined) {
+      const { bbox } = filter;
+      conditions.push(
+        inArray(
+          encounters.encounterId,
+          this.db
+            .selectDistinct({ encounterId: encounters.encounterId })
+            .from(encounters)
+            .where(
+              and(
+                inRange,
+                or(reportInBBox('a', bbox), reportInBBox('b', bbox)),
+              ),
+            ),
+        ),
+      );
+    }
+    if (filter.activity !== undefined) {
+      // Activity is decided per pair: the latest sample of each pair since
+      // the cut-off (DISTINCT ON the pair, newest first) names the one
+      // encounter of the pair that can be active. An encounter followed by a
+      // newer one of the same pair — a takeover or restart starts the pair
+      // over with a new encounter id, without a closing `none` sample —
+      // therefore counts as ended.
+      const latest = this.db
+        .selectDistinctOn([encounters.mmsiA, encounters.mmsiB], {
+          encounterId: encounters.encounterId,
+          risk: encounters.risk,
+        })
+        .from(encounters)
+        .where(gte(encounters.time, filter.activity.since))
+        .orderBy(encounters.mmsiA, encounters.mmsiB, desc(encounters.time))
+        .as('latest');
+      const active = this.db
+        .select({ encounterId: latest.encounterId })
+        .from(latest)
+        .where(ne(latest.risk, 'none'));
+      conditions.push(
+        filter.activity.active
+          ? inArray(encounters.encounterId, active)
+          : notInArray(encounters.encounterId, active),
+      );
+    }
     if (filter.after !== undefined)
       conditions.push(lt(encounters.encounterId, filter.after.encounterId));
     const having: SQL[] = [];
@@ -151,10 +225,16 @@ export class EncountersRepository {
       });
       history.set(sample.encounterId, list);
     }
+    const identities = await vesselIdentities(
+      this.db,
+      groups.flatMap((group) => [group.mmsiA, group.mmsiB]),
+    );
     return groups.map((group) => ({
       encounterId: group.encounterId,
       mmsiA: group.mmsiA,
       mmsiB: group.mmsiB,
+      vesselA: identities.get(group.mmsiA) ?? null,
+      vesselB: identities.get(group.mmsiB) ?? null,
       startedAt: group.startedAt,
       lastSampleAt: group.lastSampleAt,
       peakRisk: riskOfRank(group.peakRank),

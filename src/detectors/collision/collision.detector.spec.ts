@@ -3,9 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   RecordingEncounterSink,
-  RecordingSightings,
   RecordingStateSink,
-  TestGate,
   testMetrics,
 } from '../__testing__/fakes.js';
 import { CollisionDetector } from './collision.detector.js';
@@ -25,21 +23,22 @@ const B = 525_000_002;
 const KEY = `collision:${A}:${B}`;
 const underWay = { navstatus: 0, predictedNavstatus: 0 as const, hdg: 511 };
 
+const MINUTE = 60_000;
+/** The runner's default alert cooldown (`ALERT_COOLDOWN_S` = 600). */
+const COOLDOWN_MS = 10 * MINUTE;
+
 function setup(env: Record<string, string> = {}) {
   const states = new RecordingStateSink();
   const encounters = new RecordingEncounterSink();
-  const gate = new TestGate();
-  const sightings = new RecordingSightings();
   const harness = DetectorTestHarness.create({
-    detectors: [
-      new CollisionDetector(states, encounters, testMetrics(), gate, sightings),
-    ],
+    detectors: [new CollisionDetector(states, encounters, testMetrics())],
     distanceModel: 'sphere',
     pairSearch: { cellSizeM: 3704, maxAgeMs: 600_000 },
+    alertCooldownMs: COOLDOWN_MS,
     env,
     now: T0,
   });
-  return { harness, states, encounters, gate, sightings };
+  return { harness, states, encounters };
 }
 
 /**
@@ -222,7 +221,14 @@ describe('CollisionDetector', () => {
     await harness.tick(after(181));
 
     expect(harness.resolutions).toEqual([
-      expect.objectContaining({ reason: 'not evaluated for 120 s' }),
+      expect.objectContaining({
+        reason: 'not evaluated for 120 s',
+        data: {
+          risk: 'none',
+          messageKey: 'safety.collision.resolved_stale',
+          messageParams: { maxAgeS: 120 },
+        },
+      }),
     ]);
     expect(states.last(A)?.collision?.collisionRisk).toBe('none');
     expect(states.last(B)?.collision?.collisionRisk).toBe('none');
@@ -245,6 +251,9 @@ describe('CollisionDetector', () => {
         openedAt: harness.now,
         publishedAt: harness.now,
         lastSeenAt: harness.now,
+        // Event times of the occurrence (events.opened_at / last_seen_at).
+        firstOccurredAt: after(-90),
+        lastOccurredAt: after(-30),
         detector: 'collision',
       },
     ]);
@@ -266,17 +275,64 @@ describe('CollisionDetector', () => {
     });
     await harness.tick();
     expect(harness.resolutions).toEqual([
-      expect.objectContaining({ reason: 'pair no longer evaluated' }),
+      expect.objectContaining({
+        reason: 'pair no longer evaluated',
+        data: {
+          messageKey: 'safety.collision.resolved_not_evaluated',
+          messageParams: {},
+        },
+      }),
     ]);
   });
 
+  it('gives restored alerts the window after the first position of the active period', async () => {
+    const { harness } = setup();
+    // Last signal 10 min before the feed resumes (an outage of the service).
+    harness.services.alerts.restore([
+      {
+        alertId: '0195f3c4-0000-7000-8000-0000000000c2',
+        dedupKey: KEY,
+        type: 'collision',
+        mmsi: A,
+        relatedMmsi: B,
+        zoneId: null,
+        severity: 'warning',
+        publishedSeverity: 'warning',
+        openedAt: after(-660),
+        publishedAt: after(-660),
+        lastSeenAt: after(-600),
+        firstOccurredAt: after(-660),
+        lastOccurredAt: after(-600),
+        detector: 'collision',
+      },
+    ]);
+    await harness.activate();
+    const far = { sog: 8, cog: 0, ...underWay };
+    await harness.position({
+      mmsi: 525_000_099,
+      ...place(50, 50),
+      ...far,
+      time: after(0),
+    });
+    await harness.tick();
+    // The pair may still report: nothing is resolved before the window ends.
+    expect(harness.resolutions).toEqual([]);
+    await crossing(harness);
+    expect(harness.alertsOf('collision')).toEqual([]);
+    expect(harness.services.alerts.get(KEY)?.alertId).toBe(
+      '0195f3c4-0000-7000-8000-0000000000c2',
+    );
+  });
+
   it('starts over after a takeover: new encounter, alert kept open without a new publication', async () => {
-    const { harness, encounters, gate, sightings } = setup();
+    const { harness, encounters } = setup();
     await crossing(harness);
     expect(harness.alertsOf('collision')).toHaveLength(1);
     const before = encounters.samples.at(-1)?.encounterId;
 
-    gate.triggerResets();
+    // Another instance was active; this one takes over (onActivated).
+    await harness.deactivate();
+    await harness.activate();
     await crossing(harness, 1);
 
     expect(harness.alertsOf('collision')).toHaveLength(1);
@@ -284,10 +340,156 @@ describe('CollisionDetector', () => {
     const after = encounters.samples.at(-1)?.encounterId;
     expect(after).toBeDefined();
     expect(after).not.toBe(before);
-    expect(sightings.records.at(-1)).toMatchObject({
-      dedupKey: KEY,
-      outcome: 'unchanged',
+    expect(harness.services.alerts.get(KEY)).toMatchObject({
+      severity: 'warning',
+      lastOccurredAt: new Date(T0.getTime() + 61_000),
     });
+    expect(harness.resolutions).toEqual([]);
+  });
+
+  it('carries the localizable text of the alert (messageKey, messageParams)', async () => {
+    const { harness } = setup();
+    await harness.vessel({ mmsi: A, name: 'KM Alpha' });
+    await crossing(harness);
+    const [alert] = harness.alertsOf('collision');
+    expect(alert?.title).toBe(
+      `Medium risk of collision: KM Alpha (MMSI ${A}) and MMSI ${B}`,
+    );
+    expect(alert?.data).toMatchObject({
+      messageKey: 'safety.collision.risk',
+      messageParams: {
+        vesselA: `KM Alpha (MMSI ${A})`,
+        mmsiA: A,
+        vesselB: `MMSI ${B}`,
+        mmsiB: B,
+        risk: 'medium',
+        cpaNm: expect.closeTo(0, 2) as unknown,
+        tcpaMin: expect.closeTo(10, 0) as unknown,
+        rangeNm: expect.closeTo(2.83, 1) as unknown,
+      },
+    });
+    const data = alert?.data as {
+      cpaNm: number;
+      rangeNm: number;
+      messageParams: Record<string, unknown>;
+    };
+    const params = data.messageParams;
+    for (const value of Object.values(params))
+      expect(['string', 'number', 'boolean']).toContain(typeof value);
+    // Distances in whole metres (cross-service convention), next to the nm of the English text.
+    expect(params.cpaM).toBe(Math.round(data.cpaNm * 1852));
+    expect(params.rangeM).toBe(Math.round(data.rangeNm * 1852));
+    expect(params.rangeM).toBeGreaterThan(5000);
+  });
+
+  it('publishes one alert.resolved.v1 once the cooldown since the last raise is over', async () => {
+    const { harness } = setup();
+    for (let minutes = 0; minutes <= 12.5; minutes += 0.5)
+      await crossing(harness, minutes);
+    const raised = harness.alertsOf('collision');
+    expect(raised.map((alert) => alert.severity)).toEqual([
+      'warning',
+      'critical',
+    ]);
+    expect(harness.resolutions).toHaveLength(1);
+    // Resolved within the cooldown of the escalation: the event waits.
+    await harness.maintain();
+    expect(harness.resolvedEvents).toEqual([]);
+
+    harness.advance(COOLDOWN_MS);
+    await harness.maintain();
+    await harness.maintain();
+    expect(harness.resolvedEvents).toEqual([
+      expect.objectContaining({
+        alertId: raised[1]?.id,
+        type: 'collision',
+        domain: 'safety',
+        severity: 'critical',
+        mmsi: A,
+        relatedMmsi: B,
+        dedupKey: KEY,
+        methodId: 'collision.cpa_tcpa',
+        reason: expect.stringMatching(/^risk none \(CPA/) as unknown,
+        data: expect.objectContaining({
+          risk: 'none',
+          messageKey: 'safety.collision.resolved_risk',
+          messageParams: expect.objectContaining({ risk: 'none' }) as unknown,
+        }) as unknown,
+      }),
+    ]);
+    const resolution = harness.resolvedEvents[0]?.data as {
+      cpaNm: number;
+      messageParams: Record<string, unknown>;
+    };
+    expect(resolution.messageParams.cpaM).toBe(
+      Math.round(resolution.cpaNm * 1852),
+    );
+    expect(resolution.messageParams.cpaNm).toBe(
+      Math.round(resolution.cpaNm * 100) / 100,
+    );
+  });
+
+  it('publishes no resolution when the pair is at risk again within the cooldown', async () => {
+    const { harness } = setup();
+    await crossing(harness);
+    expect(harness.alertsOf('collision')).toHaveLength(1);
+    // B is excluded (moored) for a moment: the occurrence is resolved ...
+    await harness.position({
+      mmsi: B,
+      ...place(2 - 1 / 5, 2),
+      sog: 12,
+      cog: 270,
+      time: after(61),
+      ...underWay,
+      navstatus: 5,
+    });
+    expect(harness.resolutions).toEqual([
+      expect.objectContaining({
+        reason: `vessel ${B} excluded (stationary_navstatus)`,
+        data: {
+          risk: 'none',
+          messageKey: 'safety.collision.resolved_excluded',
+          messageParams: { mmsi: B, exclusion: 'stationary_navstatus' },
+        },
+      }),
+    ]);
+    // ... and raised again one minute later, within the cooldown.
+    harness.advance(MINUTE);
+    await crossing(harness, 2);
+    expect(harness.alertsOf('collision')).toHaveLength(1);
+    expect(harness.services.alerts.isOpen(KEY)).toBe(true);
+
+    harness.advance(COOLDOWN_MS);
+    await harness.maintain();
+    expect(harness.resolvedEvents).toEqual([]);
+  });
+
+  it('runs its housekeeping only while active, from the first position of the active period', async () => {
+    const { harness } = setup();
+    await crossing(harness);
+    const far = { sog: 8, cog: 0, ...underWay };
+    const probe = (seconds: number) =>
+      harness.position({
+        mmsi: 525_000_099,
+        ...place(50, 50 + seconds / 3600),
+        ...far,
+        time: after(seconds),
+      });
+    await harness.deactivate();
+    await probe(400);
+    await harness.tick();
+    expect(harness.resolutions).toEqual([]);
+
+    // Taking over: the tracker starts over, the open alert gets the window.
+    await harness.activate();
+    await probe(410);
+    await harness.tick();
+    expect(harness.resolutions).toEqual([]);
+    await probe(540);
+    await harness.tick();
+    expect(harness.resolutions).toEqual([
+      expect.objectContaining({ reason: 'pair no longer evaluated' }),
+    ]);
   });
 
   it('describes its thresholds', () => {

@@ -5,8 +5,6 @@ import { Module } from '@nestjs/common';
 import type { Config } from '../config.js';
 import { EncountersModule } from '../modules/encounters/encounters.module.js';
 import { VesselStatesModule } from '../modules/vessel-states/vessel-states.module.js';
-import { ALERT_SIGHTINGS, AlertSightings } from './alert-sightings.js';
-import { AlertStateSync, DETECTOR_GATE } from './alert-state-sync.js';
 import { CollisionDetector } from './collision/collision.detector.js';
 import { COLLISION_MAX_AGE_LIMIT_S } from './collision/collision.config.js';
 import { DetectorEventsRepository } from './detector-events.repository.js';
@@ -19,17 +17,23 @@ const PAIR_SEARCH_CELL_M = 3704;
 /**
  * Detector SDK wiring (spec §18). The runner consumes `AIS_POSITION` through
  * the durable `safety-positions` (a `DETECTORS` subset through
- * `safety-positions-<ids>`), keeps the `GEO` and `FLEET` projections in
- * memory, runs the enabled detectors and publishes their alerts to `ALERTS`
- * after `DetectorEventsRepository` stored them.
+ * `safety-positions-<ids>`) on one active instance (exclusive consumer,
+ * pinned TTL `DETECTOR_PINNED_TTL_MS`), keeps the `GEO` and `FLEET`
+ * projections in memory, runs the enabled detectors and publishes their
+ * alerts (`alert.raised.v1`) and resolutions (`alert.resolved.v1`, once the
+ * key's `ALERT_COOLDOWN_S` since its last raise is over) to `ALERTS` after
+ * `DetectorEventsRepository` stored them. Activation (the first position
+ * after this instance was pinned) reloads the open occurrences from
+ * `events` and calls the detectors' `onActivated`; ticks run only on the
+ * active instance.
  *
  * Distances use the `'sphere'` model: it reproduces Turf.js 7, which the
  * legacy EWS rule used, to 1e-6 m (the `'wgs84'` default differs by up to
  * 13 m, enough to flip a status at the 500 / 1 750 m thresholds).
  *
- * The detectors run through `AlertStateSync` (the kit does not reload the
- * alert state when a standby takes over) and report repeated signals to
- * `AlertSightings` (`events.last_seen_at`).
+ * `persistence: { useClass }` provides `DetectorEventsRepository` itself
+ * (one instance, also under `ALERT_PERSISTENCE`): it is not listed in
+ * `providers` again.
  */
 @Module({
   imports: [
@@ -53,14 +57,6 @@ const PAIR_SEARCH_CELL_M = 3704;
     }),
   ],
   controllers: [DetectorsController],
-  providers: [
-    DetectorEventsRepository,
-    AlertStateSync,
-    { provide: DETECTOR_GATE, useExisting: AlertStateSync },
-    AlertSightings,
-    { provide: ALERT_SIGHTINGS, useExisting: AlertSightings },
-    EwsDetector,
-    CollisionDetector,
-  ],
+  providers: [EwsDetector, CollisionDetector],
 })
 export class DetectorsModule {}

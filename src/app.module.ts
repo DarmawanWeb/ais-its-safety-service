@@ -11,6 +11,7 @@ import { EncountersModule } from './modules/encounters/encounters.module.js';
 import { EventsModule } from './modules/events/events.module.js';
 import { MethodologyModule } from './modules/methodology/methodology.module.js';
 import { VesselStatesModule } from './modules/vessel-states/vessel-states.module.js';
+import { MIGRATIONS_DIR } from './service.js';
 
 /**
  * Root module. `bootstrapService()` wraps it in the kit's platform root module
@@ -20,8 +21,9 @@ import { VesselStatesModule } from './modules/vessel-states/vessel-states.module
  */
 @Module({
   imports: [
-    // pg pool + drizzle (search_path=<DATABASE_SCHEMA>,public); migrations on boot.
-    DatabaseModule.forRoot({ schema }),
+    // pg pool + drizzle (search_path=<DATABASE_SCHEMA>,public); migrations on boot
+    // from this package's migrations/ (not the working directory).
+    DatabaseModule.forRoot({ schema, migrationsDir: MIGRATIONS_DIR }),
     // Streams this service PRODUCES to (created / widened at boot): vessel
     // safety states and the alerts of its detectors (spec §7.2, §13.7).
     NatsModule.forRoot({ streams: ['SAFETY', 'ALERTS'] }),

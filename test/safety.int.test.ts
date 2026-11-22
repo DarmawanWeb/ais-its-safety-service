@@ -399,7 +399,12 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
         ewsStatus: 3,
         collisionRisk: 'none',
         nearestPipelineZoneId: PIPELINE.id,
-        vessel: { name: 'KM Jangkar' },
+        nearestPipeline: {
+          id: PIPELINE.id,
+          code: 'it-pipeline',
+          name: 'Integration pipeline',
+        },
+        vessel: { name: 'KM Jangkar', typeCode: 'bulk_carrier' },
         predictedNavstatus: 0,
       });
 
@@ -432,6 +437,33 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
         ).json<Page>().data;
       expect(await ewsFor(viewerX)).toHaveLength(2);
       expect(await ewsFor(authority)).toHaveLength(2);
+      const [latestEws] = (
+        await get(`/api/v2/safety/events?mmsi=${ANCHORED}`, viewerX)
+      ).json<{
+        data: {
+          vessel: unknown;
+          relatedVessel: unknown;
+          data: Record<string, unknown>;
+          resolution: Record<string, unknown> | null;
+        }[];
+      }>().data;
+      expect(latestEws).toMatchObject({
+        vessel: { name: 'KM Jangkar', typeCode: 'bulk_carrier' },
+        relatedVessel: null,
+        data: {
+          messageKey: 'safety.ews.anchored_near_pipeline',
+          messageParams: {
+            vessel: `KM Jangkar (MMSI ${ANCHORED})`,
+            status: 'danger',
+            thresholdM: 500,
+            zoneCode: 'it-pipeline',
+          },
+        },
+        resolution: {
+          reason: 'safe: not at anchor within the warning distance',
+          messageKey: 'safety.ews.resolved_safe',
+        },
+      });
       expect(await ewsFor(viewerY)).toHaveLength(0);
       expect(await ewsFor({ roles: ['viewer'], orgId: null })).toHaveLength(0);
 
@@ -446,6 +478,10 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
         'collision',
         'collision',
       ]);
+      expect(collision.data[0]).toMatchObject({
+        vessel: { name: 'KM Silang' },
+        relatedVessel: null,
+      });
       expect(
         (
           await get(
@@ -504,7 +540,15 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
           mmsiB: number;
           peakRisk: string;
           minCpaNm: number;
-          history: { time: string; risk: string; cpaNm: number }[];
+          history: {
+            time: string;
+            risk: string;
+            cpaNm: number;
+            cpaPositions: {
+              a: { lat: number; lon: number };
+              b: { lat: number; lon: number };
+            } | null;
+          }[];
         }[];
         page: { nextCursor: string | null };
       }
@@ -531,6 +575,43 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
       expect(history.map((sample) => sample.time)).toEqual(
         history.map((sample) => sample.time).sort(),
       );
+      expect(encounter).toMatchObject({
+        vesselA: { name: 'KM Silang', typeCode: 'bulk_carrier' },
+        vesselB: null,
+        messageKey: 'safety.collision.encounter',
+        messageParams: {
+          vesselA: `KM Silang (MMSI ${CROSS_A})`,
+          vesselB: `MMSI ${CROSS_B}`,
+          peakRisk: 'high',
+        },
+      });
+      // Before the crossing (minute 10) the CPA points lie near (0, 2) nm.
+      const crossing = place(0, 2);
+      const ahead = history.find((sample) => sample.risk === 'medium');
+      expect(ahead?.cpaPositions?.a.lat).toBeCloseTo(crossing.lat, 2);
+      expect(ahead?.cpaPositions?.a.lon).toBeCloseTo(crossing.lon, 2);
+      expect(ahead?.cpaPositions?.b.lat).toBeCloseTo(crossing.lat, 2);
+      // The last sample (diverging, risk none) has no CPA ahead.
+      expect(history.at(-1)?.cpaPositions).toBeNull();
+
+      // Ended (a `none` sample closes it): not active.
+      const activeOf = async (query: string) =>
+        (
+          await get(
+            `/api/v2/safety/encounters?mmsi=${CROSS_A}&from=${from}&${query}`,
+            authority,
+          )
+        )
+          .json<Page>()
+          .data.map((item) => item.encounterId);
+      expect(await activeOf('active=true')).toEqual([]);
+      expect(await activeOf('active=false')).toEqual([encounter?.encounterId]);
+      expect(await activeOf(`bbox=${BBOX}`)).toEqual([encounter?.encounterId]);
+      expect(await activeOf('bbox=100,-1,101,0')).toEqual([]);
+      expect(
+        (await get(`/api/v2/safety/encounters?active=maybe`, authority))
+          .statusCode,
+      ).toBe(400);
 
       const high = (
         await get(

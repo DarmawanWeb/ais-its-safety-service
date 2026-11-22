@@ -69,7 +69,10 @@ export const vessels = serviceSchema.table(
   ],
 );
 
-/** Latest safety state per vessel (`0001_init.sql`, `0002_private_pipelines_open_events.sql`). */
+/**
+ * Latest safety state per vessel (`0001_init.sql`,
+ * `0002_private_pipelines_open_events.sql`, `0003_collision_clock.sql`).
+ */
 export const vesselState = serviceSchema.table(
   'vessel_state',
   {
@@ -102,7 +105,14 @@ export const vesselState = serviceSchema.table(
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     updatedAt: timestamptz('updated_at').notNull().defaultNow(),
   },
-  (table) => [pg.index('vessel_state_time_idx').on(table.time)],
+  (table) => [
+    pg.index('vessel_state_time_idx').on(table.time),
+    // Partial (`collision_evaluated_at IS NOT NULL`): the collision clock of
+    // GET /safety/encounters?active (EncountersRepository.collisionClock).
+    pg
+      .index('vessel_state_collision_evaluated_idx')
+      .on(table.collisionEvaluatedAt),
+  ],
 );
 
 /**

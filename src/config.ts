@@ -35,12 +35,13 @@ export const configSchema = defineConfig({
   /** Positions handled in parallel by the detectors (one vessel stays ordered). */
   DETECTOR_CONCURRENCY: envInteger(1, 64).default(8),
   /**
-   * Pinned TTL of the exclusive position consumer, ms (kit default 30 s): a
-   * standby takes over when the active instance pulled nothing for this
-   * long; a gap of half of it without positions makes the instance reload
-   * its open alerts (`AlertStateSync`).
+   * Pinned TTL of the exclusive position consumer, ms (kit default 30 s):
+   * the failover time when the active instance dies (a graceful stop
+   * releases the pin at once). The kit pulls with an expiry of a third of
+   * it, so an idle active instance keeps its pin; below 3 s the pin may be
+   * lost while idle.
    */
-  DETECTOR_PINNED_TTL_MS: envInteger(2_000, 300_000).default(
+  DETECTOR_PINNED_TTL_MS: envInteger(3_000, 300_000).default(
     DEFAULT_PINNED_TTL_MS,
   ),
   /** Minimum time between two publications of one alert key (AlertEmitter cooldown), s. */

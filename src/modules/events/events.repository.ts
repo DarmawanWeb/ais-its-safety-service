@@ -13,6 +13,10 @@ import { and, desc, eq, gte, lt, or, type SQL, sql } from 'drizzle-orm';
 
 import { scopeCondition } from '../../common/tenancy.sql.js';
 import type { SafetyReadScope } from '../../common/tenancy.js';
+import {
+  type VesselIdentity,
+  vesselIdentities,
+} from '../../common/vessel-identity.js';
 import * as schema from '../../db/schema.js';
 
 const { events } = schema;
@@ -34,10 +38,18 @@ export interface EventFilter {
   readonly limit: number;
 }
 
-/** A stored event with its coordinates. */
-export type EventRecord = Omit<typeof events.$inferSelect, 'geom'> & {
+/** A stored event row with its coordinates. */
+type EventRow = Omit<typeof events.$inferSelect, 'geom'> & {
   readonly lat: number | null;
   readonly lon: number | null;
+};
+
+/** A stored event with its coordinates and the fleet identities of its vessels. */
+export type EventRecord = EventRow & {
+  /** Identity of `mmsi` (shared across tenants, spec §8.5); `null` when unregistered. */
+  readonly vessel: VesselIdentity | null;
+  /** Identity of `relatedMmsi`; `null` without one or when unregistered. */
+  readonly relatedVessel: VesselIdentity | null;
 };
 
 /** Read side of the `events` hypertable (the AlertPersistence hook writes it). */
@@ -71,10 +83,11 @@ export class EventsRepository {
       conditions.push(
         sql`(${events.time}, ${events.id}) < (${filter.after.time}, ${filter.after.id})`,
       );
-    return this.selectEvents()
+    const rows = await this.selectEvents()
       .where(and(...conditions))
       .orderBy(desc(events.time), desc(events.id))
       .limit(filter.limit);
+    return this.withVessels(rows);
   }
 
   /** One event that `scope` may read. */
@@ -90,7 +103,23 @@ export class EventsRepository {
         ),
       )
       .limit(1);
-    return row;
+    return row === undefined ? undefined : (await this.withVessels([row]))[0];
+  }
+
+  /** The rows with the identities of their vessels (one lookup per page). */
+  private async withVessels(rows: readonly EventRow[]): Promise<EventRecord[]> {
+    const identities = await vesselIdentities(
+      this.db,
+      rows.flatMap((row) => [row.mmsi, row.relatedMmsi]),
+    );
+    return rows.map((row) => ({
+      ...row,
+      vessel: identities.get(row.mmsi) ?? null,
+      relatedVessel:
+        row.relatedMmsi === null
+          ? null
+          : (identities.get(row.relatedMmsi) ?? null),
+    }));
   }
 
   private selectEvents() {

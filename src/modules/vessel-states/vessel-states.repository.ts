@@ -28,7 +28,7 @@ import {
 } from '../../domain/safety-state.js';
 import type { VesselStateFilter, VesselStateRecord } from './vessel-state.js';
 
-const { vesselState, vessels } = schema;
+const { vesselState, vessels, zones } = schema;
 
 /** A merged state as stored, with its last publication (result of {@link VesselStatesRepository.upsertReports}). */
 export interface StoredSafetyState {
@@ -215,36 +215,44 @@ export class VesselStatesRepository {
   }
 
   private selectStates() {
-    return this.db
-      .select({
-        mmsi: vesselState.mmsi,
-        evaluatedAt: vesselState.evaluatedAt,
-        positionTime: vesselState.time,
-        lat: sql<number>`ST_Y(${vesselState.geom}::geometry)`,
-        lon: sql<number>`ST_X(${vesselState.geom}::geometry)`,
-        sog: vesselState.sog,
-        cog: vesselState.cog,
-        hdg: vesselState.hdg,
-        navstatus: vesselState.navstatus,
-        predNavstatus: vesselState.predNavstatus,
-        ewsStatus: vesselState.ewsStatus,
-        pipelineDistM: vesselState.pipelineDistM,
-        nearestPipelineZoneId: vesselState.nearestPipelineZoneId,
-        nearestPipelineOrgId: vesselState.nearestPipelineOrgId,
-        ewsEvaluatedAt: vesselState.ewsEvaluatedAt,
-        collisionRisk: vesselState.collisionRisk,
-        closestEncounter: vesselState.closestEncounter,
-        collisionEvaluatedAt: vesselState.collisionEvaluatedAt,
-        updatedAt: vesselState.updatedAt,
-        vesselId: vessels.id,
-        vesselName: vessels.name,
-      })
-      .from(vesselState)
-      .leftJoin(
-        vessels,
-        and(eq(vessels.mmsi, vesselState.mmsi), isNull(vessels.deletedAt)),
-      )
-      .$dynamic();
+    return (
+      this.db
+        .select({
+          mmsi: vesselState.mmsi,
+          evaluatedAt: vesselState.evaluatedAt,
+          positionTime: vesselState.time,
+          lat: sql<number>`ST_Y(${vesselState.geom}::geometry)`,
+          lon: sql<number>`ST_X(${vesselState.geom}::geometry)`,
+          sog: vesselState.sog,
+          cog: vesselState.cog,
+          hdg: vesselState.hdg,
+          navstatus: vesselState.navstatus,
+          predNavstatus: vesselState.predNavstatus,
+          ewsStatus: vesselState.ewsStatus,
+          pipelineDistM: vesselState.pipelineDistM,
+          nearestPipelineZoneId: vesselState.nearestPipelineZoneId,
+          nearestPipelineOrgId: vesselState.nearestPipelineOrgId,
+          ewsEvaluatedAt: vesselState.ewsEvaluatedAt,
+          collisionRisk: vesselState.collisionRisk,
+          closestEncounter: vesselState.closestEncounter,
+          collisionEvaluatedAt: vesselState.collisionEvaluatedAt,
+          updatedAt: vesselState.updatedAt,
+          vesselId: vessels.id,
+          vesselName: vessels.name,
+          vesselTypeCode: vessels.typeCode,
+          pipelineCode: zones.code,
+          pipelineName: zones.name,
+        })
+        .from(vesselState)
+        .leftJoin(
+          vessels,
+          and(eq(vessels.mmsi, vesselState.mmsi), isNull(vessels.deletedAt)),
+        )
+        // The zone the state refers to, also when it was deleted since (until the
+        // vessel's next evaluation the state still names it).
+        .leftJoin(zones, eq(zones.id, vesselState.nearestPipelineZoneId))
+        .$dynamic()
+    );
   }
 }
 
@@ -270,6 +278,16 @@ function toRecord(row: SelectedState): VesselStateRecord {
     ewsStatus: EwsStatusSchema.parse(row.ewsStatus) satisfies EwsStatus,
     pipelineDistanceM: row.pipelineDistM,
     nearestPipelineZoneId: row.nearestPipelineZoneId,
+    nearestPipeline:
+      row.nearestPipelineZoneId === null ||
+      row.pipelineCode === null ||
+      row.pipelineName === null
+        ? null
+        : {
+            id: row.nearestPipelineZoneId,
+            code: row.pipelineCode,
+            name: row.pipelineName,
+          },
     nearestPipelineOrgId: row.nearestPipelineOrgId,
     collisionRisk: row.collisionRisk satisfies CollisionRisk,
     closestEncounter: row.closestEncounter,
@@ -280,7 +298,11 @@ function toRecord(row: SelectedState): VesselStateRecord {
     vessel:
       row.vesselId === null || row.vesselName === null
         ? null
-        : { id: row.vesselId, name: row.vesselName },
+        : {
+            id: row.vesselId,
+            name: row.vesselName,
+            typeCode: row.vesselTypeCode,
+          },
     updatedAt: row.updatedAt,
   };
 }

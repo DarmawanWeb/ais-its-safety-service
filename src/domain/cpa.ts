@@ -173,3 +173,43 @@ export function deadReckon(
     (velocity.x * hours) / (NM_PER_DEGREE * Math.cos(toRadians(state.lat)));
   return { lat, lon: longitudeDelta(0, lon) };
 }
+
+/** A vessel report: position, motion and the time it was taken. */
+export interface TimedMotionState extends MotionState {
+  readonly time: Date;
+}
+
+/** Predicted positions of both vessels of a pair at their closest point of approach. */
+export interface CpaPositions {
+  readonly a: Pick<MotionState, 'lat' | 'lon'>;
+  readonly b: Pick<MotionState, 'lat' | 'lon'>;
+}
+
+/**
+ * Where the two vessels are predicted at their closest point of approach:
+ * each report dead-reckoned on constant SOG/COG ({@link deadReckon}) from
+ * its own time to `at + tcpaMin`, where `at` is the instant the CPA/TCPA
+ * was computed for (the evaluating vessel's report; the other report is
+ * aligned to it). `undefined` without relative motion (`tcpaMin` `null`),
+ * for a closest point in the past (`tcpaMin < 0`, diverging) or when a
+ * report has no usable SOG/COG.
+ *
+ * @method collision.cpa_tcpa
+ * @see docs/METHODOLOGY.md §6.1 (`collision.cpa_tcpa`, assumptions)
+ */
+export function predictedCpaPositions(
+  a: TimedMotionState,
+  b: TimedMotionState,
+  at: Date,
+  tcpaMin: number | null,
+): CpaPositions | undefined {
+  if (tcpaMin === null || !Number.isFinite(tcpaMin) || tcpaMin < 0)
+    return undefined;
+  for (const report of [a, b])
+    if (!isSogAvailable(report.sogKn) || !isCogAvailable(report.cogDeg))
+      return undefined;
+  const cpaTime = at.getTime() + tcpaMin * 60_000;
+  const at_ = (report: TimedMotionState) =>
+    deadReckon(report, (cpaTime - report.time.getTime()) / 60_000);
+  return { a: at_(a), b: at_(b) };
+}
