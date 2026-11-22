@@ -34,7 +34,7 @@ export class ListEncountersQuery extends IntersectionType(
   @ApiPropertyOptional({
     type: String,
     example: 'medium,high',
-    description: `Risk bands, comma separated (${COLLISION_RISKS.join(', ')})`,
+    description: `Encounters whose highest band in the range is one of these, comma separated (${COLLISION_RISKS.join(', ')})`,
   })
   @IsOptional()
   @Transform(({ value }: { value: unknown }) =>
@@ -60,7 +60,7 @@ export class ListEncountersQuery extends IntersectionType(
 
   @ApiPropertyOptional({
     format: 'uuid',
-    description: 'Samples of one encounter',
+    description: 'One encounter',
   })
   @IsOptional()
   @IsUUID()

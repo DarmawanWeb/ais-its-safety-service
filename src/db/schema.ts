@@ -10,6 +10,7 @@ import type {
   VesselStatus,
   ZoneKind,
 } from '@darmawanweb/ais-its-contracts/domain';
+import type { ClosestEncounter } from '@darmawanweb/ais-its-contracts/events';
 import { geography } from '@darmawanweb/ais-its-nest/db';
 import * as pg from 'drizzle-orm/pg-core';
 
@@ -68,13 +69,6 @@ export const vessels = serviceSchema.table(
   ],
 );
 
-/** `closest_encounter` of `vessel_state` (contracts `ClosestEncounter`). */
-export interface ClosestEncounterJson {
-  readonly otherMmsi: number;
-  readonly cpaNm: number;
-  readonly tcpaMin: number;
-}
-
 /** Latest safety state per vessel (`0001_init.sql`). */
 export const vesselState = serviceSchema.table(
   'vessel_state',
@@ -96,9 +90,7 @@ export const vesselState = serviceSchema.table(
       .$type<CollisionRisk>()
       .notNull()
       .default('none'),
-    closestEncounter: pg
-      .jsonb('closest_encounter')
-      .$type<ClosestEncounterJson>(),
+    closestEncounter: pg.jsonb('closest_encounter').$type<ClosestEncounter>(),
     collisionEvaluatedAt: timestamptz('collision_evaluated_at'),
     evaluatedAt: timestamptz('evaluated_at').notNull(),
     publishedState: pg
@@ -151,7 +143,8 @@ export const events = serviceSchema.table(
   (table) => [
     pg.primaryKey({ columns: [table.id, table.time] }),
     pg.index('events_open_idx').on(table.dedupKey),
-    pg.index('events_time_idx').on(table.time, table.id),
+    pg.index('events_time_idx').on(table.time),
+    pg.index('events_time_id_idx').on(table.time, table.id),
     pg.index('events_mmsi_time_idx').on(table.mmsi, table.time),
   ],
 );

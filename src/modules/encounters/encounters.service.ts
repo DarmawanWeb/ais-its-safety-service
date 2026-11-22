@@ -14,16 +14,13 @@ import {
   ENCOUNTERS_MAX_RANGE_MS,
   type ListEncountersQuery,
 } from './dto/list-encounters.query.js';
-import {
-  type EncounterRow,
-  EncountersRepository,
-} from './encounters.repository.js';
+import type { EncounterRecord } from './encounter.js';
+import { EncountersRepository } from './encounters.repository.js';
 
-/** Keyset position of the encounters list (newest first). */
+/** Keyset position of the encounters list (latest sample first). */
 const EncounterCursorSchema = z.object({
-  time: z.iso.datetime(),
-  mmsiA: z.number().int(),
-  mmsiB: z.number().int(),
+  lastSampleAt: z.iso.datetime(),
+  encounterId: z.uuid(),
 });
 
 /**
@@ -35,12 +32,12 @@ const EncounterCursorSchema = z.object({
 export class EncountersService {
   constructor(private readonly encounters: EncountersRepository) {}
 
-  /** A page of samples matching the query, newest first. */
+  /** A page of encounters with samples in the query's range, latest sample first. */
   async list(
     query: ListEncountersQuery,
     principal: Principal,
     now: Date = new Date(),
-  ): Promise<CursorPage<EncounterRow>> {
+  ): Promise<CursorPage<EncounterRecord>> {
     const { from, to } = resolveQueryTimeRange(query, {
       defaultDurationMs: ENCOUNTERS_DEFAULT_RANGE_MS,
       maxDurationMs: ENCOUNTERS_MAX_RANGE_MS,
@@ -51,21 +48,23 @@ export class EncountersService {
       {
         from,
         to,
-        risks: query.risk,
+        peakRisks: query.risk,
         mmsi: query.mmsi,
         encounterId: query.encounterId,
         after:
           after === undefined
             ? undefined
-            : { ...after, time: new Date(after.time) },
+            : {
+                lastSampleAt: new Date(after.lastSampleAt),
+                encounterId: after.encounterId,
+              },
         limit: query.limit + 1,
       },
       safetyReadScope(principal),
     );
     return cursorPage(rows, query.limit, (row) => ({
-      time: row.time.toISOString(),
-      mmsiA: row.mmsiA,
-      mmsiB: row.mmsiB,
+      lastSampleAt: row.lastSampleAt.toISOString(),
+      encounterId: row.encounterId,
     }));
   }
 }

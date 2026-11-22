@@ -70,22 +70,22 @@ export class ZonesRepository {
   }
 
   /**
-   * Tombstones live zones absent from a complete stream snapshot. Only rows
-   * not projected since the snapshot started are touched, so a zone the
-   * durable consumer added meanwhile survives.
+   * Removes the rows of zones absent from a complete snapshot of the
+   * compacted stream. Such a row has no message left in the stream (not even
+   * a deletion), so nothing can resurrect it and no tombstone is needed; a
+   * later republication inserts it again. Rows projected since the snapshot
+   * started are kept (the durable consumer may have added them meanwhile).
    *
-   * @returns how many zones were tombstoned.
+   * @returns how many rows were removed.
    */
-  async markAbsentDeleted(
+  async deleteAbsent(
     presentIds: readonly string[],
     snapshotStartedAt: Date,
   ): Promise<number> {
     const rows = await this.db
-      .update(zones)
-      .set({ deletedAt: snapshotStartedAt, updatedAt: sql`now()` })
+      .delete(zones)
       .where(
         and(
-          isNull(zones.deletedAt),
           lt(zones.updatedAt, snapshotStartedAt),
           sql`NOT (${zones.id} = ANY (SELECT jsonb_array_elements_text(${JSON.stringify(presentIds)}::jsonb)::uuid))`,
         ),

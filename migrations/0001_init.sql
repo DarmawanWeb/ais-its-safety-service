@@ -129,11 +129,12 @@ CREATE TABLE events (
   PRIMARY KEY (id, time)
 );
 
+-- create_hypertable also creates the default index events_time_idx (time DESC).
 SELECT create_hypertable('events', by_range('time', INTERVAL '7 days'));
 SELECT add_retention_policy('events', INTERVAL '2 years');
 
 CREATE INDEX events_open_idx ON events (dedup_key) WHERE status = 'open';
-CREATE INDEX events_time_idx ON events (time DESC, id DESC);
+CREATE INDEX events_time_id_idx ON events (time DESC, id DESC);
 CREATE INDEX events_mmsi_time_idx ON events (mmsi, time DESC);
 CREATE INDEX events_related_mmsi_time_idx ON events (related_mmsi, time DESC) WHERE related_mmsi IS NOT NULL;
 CREATE INDEX events_geom_idx ON events USING gist ((geom::geometry));
@@ -158,6 +159,7 @@ CREATE TABLE encounters (
   CHECK (mmsi_a < mmsi_b)
 );
 
+-- create_hypertable also creates the default index encounters_time_idx (time DESC).
 SELECT create_hypertable('encounters', by_range('time', INTERVAL '7 days'));
 ALTER TABLE encounters SET (
   timescaledb.compress,
@@ -167,6 +169,5 @@ ALTER TABLE encounters SET (
 SELECT add_compression_policy('encounters', INTERVAL '14 days');
 SELECT add_retention_policy('encounters', INTERVAL '2 years');
 
-CREATE INDEX encounters_time_idx ON encounters (time DESC);
 CREATE INDEX encounters_mmsi_b_time_idx ON encounters (mmsi_b, time DESC);
 CREATE INDEX encounters_encounter_idx ON encounters (encounter_id, time DESC);

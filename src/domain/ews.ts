@@ -65,6 +65,8 @@ export function assessEws(
       severity: null,
     };
   }
+  // SOURCE: thesis — needs citation (the "predicted at anchor only" rule and the article
+  // behind 500 / 1 750 m; the constants match PP 27/2021 Pasal 31(3), Permen ESDM 32/2021).
   const ewsStatus = classifyEwsStatus(
     nearest.distanceM,
     predictedNavstatus,

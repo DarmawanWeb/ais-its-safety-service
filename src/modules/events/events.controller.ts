@@ -5,14 +5,10 @@ import {
   RequirePermissions,
 } from '@darmawanweb/ais-its-nest/auth';
 import { ApiCursorResponse } from '@darmawanweb/ais-its-nest/http';
-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
-import {
-  ApiOkResponse,
-  ApiOperation,
-  ApiParam,
-  ApiTags,
-} from '@nestjs/swagger';
+import { Controller, Get, Param, Query } from '@nestjs/common';
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+import { EventIdParam } from './dto/event-id.param.js';
 import { ListEventsQuery } from './dto/list-events.query.js';
 import { SafetyEventDto } from './dto/safety-event.dto.js';
 import { EventsService } from './events.service.js';
@@ -44,12 +40,11 @@ export class EventsController {
   @Get(':id')
   @RequirePermissions('safety:read')
   @ApiOperation({ summary: 'One safety event' })
-  @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: SafetyEventDto })
   async get(
-    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param() params: EventIdParam,
     @CurrentPrincipal() principal: Principal,
   ): Promise<SafetyEventDto> {
-    return new SafetyEventDto(await this.events.get(id, principal));
+    return new SafetyEventDto(await this.events.get(params.id, principal));
   }
 }

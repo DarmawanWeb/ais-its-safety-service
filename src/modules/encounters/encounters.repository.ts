@@ -1,7 +1,12 @@
+import {
+  COLLISION_RISKS,
+  type CollisionRisk,
+} from '@darmawanweb/ais-its-contracts/domain';
 import { type Database, InjectDb } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import {
   and,
+  asc,
   desc,
   eq,
   gte,
@@ -15,12 +20,33 @@ import {
 import { scopeCondition } from '../../common/tenancy.sql.js';
 import type { SafetyReadScope } from '../../common/tenancy.js';
 import * as schema from '../../db/schema.js';
-import type { EncounterFilter, EncounterSample } from './encounter.js';
+import type {
+  EncounterFilter,
+  EncounterHistorySample,
+  EncounterRecord,
+  EncounterSample,
+} from './encounter.js';
 
 const { encounters } = schema;
 
-/** A stored encounter sample. */
-export type EncounterRow = typeof encounters.$inferSelect;
+/** Rank of a band (`none` 0 … `high` 3), the order of contracts `COLLISION_RISKS`. */
+const riskRank = (risk: CollisionRisk): number => COLLISION_RISKS.indexOf(risk);
+
+/** SQL rank of the `risk` column, same order as {@link riskRank}. */
+const RISK_RANK_SQL = sql`CASE ${encounters.risk} ${sql.join(
+  COLLISION_RISKS.map(
+    (risk) => sql`WHEN ${risk} THEN ${sql.raw(String(riskRank(risk)))}`,
+  ),
+  sql` `,
+)} END`;
+
+const PEAK_RANK = sql<number>`max(${RISK_RANK_SQL})`;
+const LAST_SAMPLE_AT = sql`max(${encounters.time})`;
+
+/** The band of a rank computed by {@link RISK_RANK_SQL}. */
+function riskOfRank(rank: number): CollisionRisk {
+  return COLLISION_RISKS[rank] ?? 'none';
+}
 
 /** `encounters` hypertable: samples written by the collision detector, read by the REST API. */
 @Injectable()
@@ -48,18 +74,24 @@ export class EncountersRepository {
       .onConflictDoNothing();
   }
 
-  /** Samples matching `filter` that `scope` may read, newest first (`limit` rows). */
+  /**
+   * Encounters with samples in the filter's range that `scope` may read,
+   * latest sample first (`limit` encounters), each with its samples in the
+   * range. Two statements: the encounters (grouped samples), then their
+   * history.
+   */
   async list(
     filter: EncounterFilter,
     scope: SafetyReadScope,
-  ): Promise<EncounterRow[]> {
-    const conditions: (SQL | undefined)[] = [
+  ): Promise<EncounterRecord[]> {
+    const inRange = and(
       gte(encounters.time, filter.from),
       lt(encounters.time, filter.to),
+    );
+    const conditions: (SQL | undefined)[] = [
+      inRange,
       scopeCondition(scope, [encounters.mmsiA, encounters.mmsiB]),
     ];
-    if (filter.risks !== undefined)
-      conditions.push(inArray(encounters.risk, [...filter.risks]));
     if (filter.mmsi !== undefined)
       conditions.push(
         or(
@@ -69,21 +101,67 @@ export class EncountersRepository {
       );
     if (filter.encounterId !== undefined)
       conditions.push(eq(encounters.encounterId, filter.encounterId));
-    if (filter.after !== undefined) {
-      const { time, mmsiA, mmsiB } = filter.after;
-      conditions.push(
-        sql`(${encounters.time}, ${encounters.mmsiA}, ${encounters.mmsiB}) < (${time}, ${mmsiA}, ${mmsiB})`,
+    const having: SQL[] = [];
+    if (filter.peakRisks !== undefined)
+      having.push(inArray(PEAK_RANK, filter.peakRisks.map(riskRank)));
+    if (filter.after !== undefined)
+      having.push(
+        sql`(${LAST_SAMPLE_AT}, ${encounters.encounterId}) < (${filter.after.lastSampleAt}, ${filter.after.encounterId})`,
       );
-    }
-    return this.db
-      .select()
+
+    const groups = await this.db
+      .select({
+        encounterId: encounters.encounterId,
+        mmsiA: encounters.mmsiA,
+        mmsiB: encounters.mmsiB,
+        startedAt: sql`min(${encounters.time})`.mapWith(encounters.time),
+        lastSampleAt: LAST_SAMPLE_AT.mapWith(encounters.time),
+        peakRank: PEAK_RANK.mapWith(Number),
+        minCpaNm: sql`min(${encounters.cpaNm})`.mapWith(Number),
+      })
       .from(encounters)
       .where(and(...conditions))
-      .orderBy(
-        desc(encounters.time),
-        desc(encounters.mmsiA),
-        desc(encounters.mmsiB),
-      )
+      .groupBy(encounters.encounterId, encounters.mmsiA, encounters.mmsiB)
+      .having(having.length === 0 ? undefined : and(...having))
+      .orderBy(desc(LAST_SAMPLE_AT), desc(encounters.encounterId))
       .limit(filter.limit);
+    if (groups.length === 0) return [];
+
+    const samples = await this.db
+      .select()
+      .from(encounters)
+      .where(
+        and(
+          inRange,
+          inArray(
+            encounters.encounterId,
+            groups.map((group) => group.encounterId),
+          ),
+        ),
+      )
+      .orderBy(asc(encounters.time));
+    const history = new Map<string, EncounterHistorySample[]>();
+    for (const sample of samples) {
+      const list = history.get(sample.encounterId) ?? [];
+      list.push({
+        time: sample.time,
+        cpaNm: sample.cpaNm,
+        tcpaMin: sample.tcpaMin,
+        rangeNm: sample.rangeNm,
+        risk: sample.risk,
+        positions: sample.positions,
+      });
+      history.set(sample.encounterId, list);
+    }
+    return groups.map((group) => ({
+      encounterId: group.encounterId,
+      mmsiA: group.mmsiA,
+      mmsiB: group.mmsiB,
+      startedAt: group.startedAt,
+      lastSampleAt: group.lastSampleAt,
+      peakRisk: riskOfRank(group.peakRank),
+      minCpaNm: group.minCpaNm,
+      history: history.get(group.encounterId) ?? [],
+    }));
   }
 }

@@ -132,7 +132,9 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
     db
       .select()
       .from(schema.events)
-      .where(or(eq(schema.events.mmsi, mmsi), eq(schema.events.relatedMmsi, mmsi)))
+      .where(
+        or(eq(schema.events.mmsi, mmsi), eq(schema.events.relatedMmsi, mmsi)),
+      )
       .orderBy(asc(schema.events.createdAt));
 
   beforeAll(async () => {
@@ -145,7 +147,12 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
     ] as const) {
       const { ack } = await publisher().publishEvent(
         EVENT_TYPES.FLEET_VESSEL_UPSERTED,
-        makeTestVesselSnapshot({ mmsi, orgId, name, updatedAt: new Date().toISOString() }),
+        makeTestVesselSnapshot({
+          mmsi,
+          orgId,
+          name,
+          updatedAt: new Date().toISOString(),
+        }),
       );
       await service.processed('FLEET', 'safety-fleet', ack);
     }
@@ -174,21 +181,39 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
       .select()
       .from(schema.zones)
       .where(eq(schema.zones.id, PIPELINE.id));
-    expect(zone).toMatchObject({ kind: 'pipeline', code: 'it-pipeline', deletedAt: null });
+    expect(zone).toMatchObject({
+      kind: 'pipeline',
+      code: 'it-pipeline',
+      deletedAt: null,
+    });
     const vessels = await db
       .select()
       .from(schema.vessels)
       .where(eq(schema.vessels.mmsi, ANCHORED));
-    expect(vessels).toEqual([expect.objectContaining({ orgId: ORG_X, name: 'KM Jangkar' })]);
+    expect(vessels).toEqual([
+      expect.objectContaining({ orgId: ORG_X, name: 'KM Jangkar' }),
+    ]);
   });
 
   it('EWS: warning, escalation to danger, no repeats while unchanged, resolution when safe', async () => {
     const t0 = Date.now() - 60_000;
-    const anchored = { navstatus: 1, predictedNavstatus: 1 as const, sog: 0.1, cog: 15 };
+    const anchored = {
+      navstatus: 1,
+      predictedNavstatus: 1 as const,
+      sog: 0.1,
+      cog: 15,
+    };
     const subject = subjects.alert('ews', ANCHORED);
 
     // 1. Predicted at anchor 1 000 m from the pipeline → warning.
-    await publishPosition(position({ mmsi: ANCHORED, ...east(1000), ...anchored, time: new Date(t0) }));
+    await publishPosition(
+      position({
+        mmsi: ANCHORED,
+        ...east(1000),
+        ...anchored,
+        time: new Date(t0),
+      }),
+    );
     const warning = await waitFor(() => lastAlert(subject));
     expect(warning).toMatchObject({
       type: 'ews',
@@ -206,7 +231,10 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
       },
     });
     expect(warning.data.pipelineDistanceM).toBeCloseTo(1000, 3);
-    const warned = await safetyState(ANCHORED, (state) => state.ewsStatus === 1);
+    const warned = await safetyState(
+      ANCHORED,
+      (state) => state.ewsStatus === 1,
+    );
     expect(warned).toMatchObject({
       nearestPipelineZoneId: PIPELINE.id,
       collisionRisk: 'none',
@@ -215,24 +243,52 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
     expect(warned.pipelineDistanceM).toBeCloseTo(1000, 3);
 
     // 2. 300 m → danger: escalated (a new critical alert, same key).
-    await publishPosition(position({ mmsi: ANCHORED, ...east(300), ...anchored, time: new Date(t0 + 10_000) }));
-    await waitFor(async () => (await lastAlert(subject)).severity === 'critical');
+    await publishPosition(
+      position({
+        mmsi: ANCHORED,
+        ...east(300),
+        ...anchored,
+        time: new Date(t0 + 10_000),
+      }),
+    );
+    await waitFor(
+      async () => (await lastAlert(subject)).severity === 'critical',
+    );
     await safetyState(ANCHORED, (state) => state.ewsStatus === 0);
 
     // 3. Still in danger → nothing new is published.
-    await publishPosition(position({ mmsi: ANCHORED, ...east(310), ...anchored, time: new Date(t0 + 20_000) }));
+    await publishPosition(
+      position({
+        mmsi: ANCHORED,
+        ...east(310),
+        ...anchored,
+        time: new Date(t0 + 20_000),
+      }),
+    );
     expect(await count('ALERTS', subject)).toBe(2);
 
     // 4. Under way again → safe → the occurrence is resolved.
     await publishPosition(
-      position({ mmsi: ANCHORED, ...east(320), navstatus: 0, predictedNavstatus: 0, sog: 7, cog: 90, time: new Date(t0 + 30_000) }),
+      position({
+        mmsi: ANCHORED,
+        ...east(320),
+        navstatus: 0,
+        predictedNavstatus: 0,
+        sog: 7,
+        cog: 90,
+        time: new Date(t0 + 30_000),
+      }),
     );
     await safetyState(ANCHORED, (state) => state.ewsStatus === 3);
     const rows = await waitFor(async () => {
       const events = await eventsOf(ANCHORED);
-      return events.every((event) => event.status === 'resolved') ? events : undefined;
+      return events.every((event) => event.status === 'resolved')
+        ? events
+        : undefined;
     });
-    expect(rows.map((row) => [row.detector, row.severity, row.resolution?.['reason']])).toEqual([
+    expect(
+      rows.map((row) => [row.detector, row.severity, row.resolution?.reason]),
+    ).toEqual([
       ['ews', 'warning', 'escalated'],
       ['ews', 'critical', 'safe: not at anchor within the warning distance'],
     ]);
@@ -245,10 +301,22 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
     for (let minute = 0; minute <= 12; minute += 1) {
       const time = t0 + minute * 60_000;
       await publishPosition(
-        position({ mmsi: CROSS_A, ...place(0, minute / 5), sog: 12, cog: 0, time: new Date(time) }),
+        position({
+          mmsi: CROSS_A,
+          ...place(0, minute / 5),
+          sog: 12,
+          cog: 0,
+          time: new Date(time),
+        }),
       );
       await publishPosition(
-        position({ mmsi: CROSS_B, ...place(2 - minute / 5, 2), sog: 12, cog: 270, time: new Date(time + 1000) }),
+        position({
+          mmsi: CROSS_B,
+          ...place(2 - minute / 5, 2),
+          sog: 12,
+          cog: 270,
+          time: new Date(time + 1000),
+        }),
       );
     }
     const subject = subjects.alert('collision', CROSS_A);
@@ -265,18 +333,25 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
 
     const rows = await waitFor(async () => {
       const events = await eventsOf(CROSS_B);
-      return events.length === 2 && events.every((event) => event.status === 'resolved')
+      return events.length === 2 &&
+        events.every((event) => event.status === 'resolved')
         ? events
         : undefined;
     });
-    expect(rows.map((row) => [row.detector, row.severity, row.dedupKey])).toEqual([
+    expect(
+      rows.map((row) => [row.detector, row.severity, row.dedupKey]),
+    ).toEqual([
       ['collision', 'warning', PAIR_KEY],
       ['collision', 'critical', PAIR_KEY],
     ]);
-    expect(rows[1]?.resolution?.['reason']).toMatch(/^risk none/);
+    expect(rows[1]?.resolution?.reason).toMatch(/^risk none/);
 
     for (const mmsi of [CROSS_A, CROSS_B])
-      await safetyState(mmsi, (state) => state.collisionRisk === 'none' && state.closestEncounter === null);
+      await safetyState(
+        mmsi,
+        (state) =>
+          state.collisionRisk === 'none' && state.closestEncounter === null,
+      );
 
     const samples = await db
       .select()
@@ -291,14 +366,24 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
   });
 
   describe('REST API (tenancy spec §8.5)', () => {
-    const get = async (url: string, claims: Parameters<TestService['authorization']>[0]) =>
-      service.app.inject({ method: 'GET', url, headers: await service.authorization(claims) });
+    const get = async (
+      url: string,
+      claims: Parameters<TestService['authorization']>[0],
+    ) =>
+      service.app.inject({
+        method: 'GET',
+        url,
+        headers: await service.authorization(claims),
+      });
     const viewerX = { roles: ['viewer'] as const, orgId: ORG_X };
     const viewerY = { roles: ['viewer'] as const, orgId: ORG_Y };
     const authority = { roles: ['authority'] as const, orgId: newId() };
 
     it('lists the latest safety states of a viewport for every tenant', async () => {
-      const response = await get(`/api/v2/safety/vessels?bbox=${BBOX}`, viewerY);
+      const response = await get(
+        `/api/v2/safety/vessels?bbox=${BBOX}`,
+        viewerY,
+      );
       expect(response.statusCode).toBe(200);
       const states = response.json<{ mmsi: number }[]>();
       expect(states.map((state) => state.mmsi)).toEqual(
@@ -315,57 +400,157 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
         predictedNavstatus: 0,
       });
 
-      const atRisk = await get(`/api/v2/safety/vessels?bbox=${BBOX}&ewsStatus=0,1`, viewerY);
-      expect(atRisk.json<{ mmsi: number }[]>().map((state) => state.mmsi)).not.toContain(ANCHORED);
+      const atRisk = await get(
+        `/api/v2/safety/vessels?bbox=${BBOX}&ewsStatus=0,1`,
+        viewerY,
+      );
+      expect(
+        atRisk.json<{ mmsi: number }[]>().map((state) => state.mmsi),
+      ).not.toContain(ANCHORED);
 
       const missing = await get('/api/v2/safety/vessels/999999999', viewerY);
       expect(missing.statusCode).toBe(404);
-      expect(missing.headers['content-type']).toContain('application/problem+json');
+      expect(missing.headers['content-type']).toContain(
+        'application/problem+json',
+      );
       expect(missing.json()).toMatchObject({ code: 'SAFETY_STATE_NOT_FOUND' });
     });
 
     it('scopes events to the vessels of the organization, authority sees all', async () => {
-      type Page = { data: { id: string; mmsi: number; detector: string }[]; page: { nextCursor: string | null } };
-      const ewsFor = async (claims: Parameters<TestService['authorization']>[0]) =>
-        (await get(`/api/v2/safety/events?mmsi=${ANCHORED}`, claims)).json<Page>().data;
+      interface Page {
+        data: { id: string; mmsi: number; detector: string }[];
+        page: { nextCursor: string | null };
+      }
+      const ewsFor = async (
+        claims: Parameters<TestService['authorization']>[0],
+      ) =>
+        (
+          await get(`/api/v2/safety/events?mmsi=${ANCHORED}`, claims)
+        ).json<Page>().data;
       expect(await ewsFor(viewerX)).toHaveLength(2);
       expect(await ewsFor(authority)).toHaveLength(2);
       expect(await ewsFor(viewerY)).toHaveLength(0);
       expect(await ewsFor({ roles: ['viewer'], orgId: null })).toHaveLength(0);
 
       // CROSS_B is unregistered: its collision events belong to org Y through CROSS_A.
-      const collision = (await get(`/api/v2/safety/events?detector=collision&mmsi=${CROSS_B}`, viewerY)).json<Page>();
-      expect(collision.data.map((event) => event.detector)).toEqual(['collision', 'collision']);
-      expect((await get(`/api/v2/safety/events?detector=collision&mmsi=${CROSS_B}`, viewerX)).json<Page>().data).toEqual([]);
+      const collision = (
+        await get(
+          `/api/v2/safety/events?detector=collision&mmsi=${CROSS_B}`,
+          viewerY,
+        )
+      ).json<Page>();
+      expect(collision.data.map((event) => event.detector)).toEqual([
+        'collision',
+        'collision',
+      ]);
+      expect(
+        (
+          await get(
+            `/api/v2/safety/events?detector=collision&mmsi=${CROSS_B}`,
+            viewerX,
+          )
+        ).json<Page>().data,
+      ).toEqual([]);
 
-      const first = (await get(`/api/v2/safety/events?mmsi=${ANCHORED}&limit=1`, viewerX)).json<Page>();
+      const first = (
+        await get(`/api/v2/safety/events?mmsi=${ANCHORED}&limit=1`, viewerX)
+      ).json<Page>();
       expect(first.data).toHaveLength(1);
       expect(first.page.nextCursor).not.toBeNull();
       const second = (
-        await get(`/api/v2/safety/events?mmsi=${ANCHORED}&limit=1&cursor=${first.page.nextCursor ?? ''}`, viewerX)
+        await get(
+          `/api/v2/safety/events?mmsi=${ANCHORED}&limit=1&cursor=${first.page.nextCursor ?? ''}`,
+          viewerX,
+        )
       ).json<Page>();
-      expect(second.data.map((event) => event.id)).not.toEqual(first.data.map((event) => event.id));
+      expect(second.data.map((event) => event.id)).not.toEqual(
+        first.data.map((event) => event.id),
+      );
 
       const id = first.data[0]?.id ?? '';
-      expect((await get(`/api/v2/safety/events/${id}`, viewerX)).statusCode).toBe(200);
+      expect(
+        (await get(`/api/v2/safety/events/${id}`, viewerX)).statusCode,
+      ).toBe(200);
       const hidden = await get(`/api/v2/safety/events/${id}`, viewerY);
       expect(hidden.statusCode).toBe(404);
       expect(hidden.json()).toMatchObject({ code: 'SAFETY_EVENT_NOT_FOUND' });
 
-      const invalid = await get('/api/v2/safety/events?severity=bogus', authority);
+      const malformed = await get(
+        '/api/v2/safety/events/not-a-uuid',
+        authority,
+      );
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.json()).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        errors: [expect.objectContaining({ field: 'id' })],
+      });
+
+      const invalid = await get(
+        '/api/v2/safety/events?severity=bogus',
+        authority,
+      );
       expect(invalid.statusCode).toBe(400);
       expect(invalid.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
     });
 
-    it('serves the encounter history to the tenants of the pair', async () => {
-      type Page = { data: { encounterId: string; risk: string; mmsiA: number }[] };
-      const mine = (await get(`/api/v2/safety/encounters?mmsi=${CROSS_A}&from=${new Date(Date.now() - 3_600_000).toISOString()}`, viewerY)).json<Page>();
-      expect(mine.data.length).toBeGreaterThan(2);
-      expect(mine.data.every((sample) => sample.mmsiA === CROSS_A)).toBe(true);
-      const high = (await get(`/api/v2/safety/encounters?mmsi=${CROSS_A}&risk=high`, authority)).json<Page>();
-      expect(high.data.length).toBeGreaterThan(0);
-      expect(high.data.every((sample) => sample.risk === 'high')).toBe(true);
-      expect((await get(`/api/v2/safety/encounters?mmsi=${CROSS_A}`, viewerX)).json<Page>().data).toEqual([]);
+    it('serves the encounters with their CPA/TCPA history to the tenants of the pair', async () => {
+      interface Page {
+        data: {
+          encounterId: string;
+          mmsiA: number;
+          mmsiB: number;
+          peakRisk: string;
+          minCpaNm: number;
+          history: { time: string; risk: string; cpaNm: number }[];
+        }[];
+        page: { nextCursor: string | null };
+      }
+      const from = new Date(Date.now() - 3_600_000).toISOString();
+      const mine = (
+        await get(
+          `/api/v2/safety/encounters?mmsi=${CROSS_A}&from=${from}`,
+          viewerY,
+        )
+      ).json<Page>();
+      expect(mine.data).toHaveLength(1);
+      const encounter = mine.data[0];
+      expect(encounter).toMatchObject({
+        mmsiA: CROSS_A,
+        mmsiB: CROSS_B,
+        peakRisk: 'high',
+      });
+      expect(encounter?.minCpaNm).toBeLessThan(0.25);
+      const history = encounter?.history ?? [];
+      expect(history.length).toBeGreaterThan(2);
+      expect(history.map((sample) => sample.risk)).toContain('high');
+      expect(history[0]?.risk).toBe('medium');
+      expect(history.at(-1)?.risk).toBe('none');
+      expect(history.map((sample) => sample.time)).toEqual(
+        history.map((sample) => sample.time).sort(),
+      );
+
+      const high = (
+        await get(
+          `/api/v2/safety/encounters?mmsi=${CROSS_A}&risk=high`,
+          authority,
+        )
+      ).json<Page>();
+      expect(high.data.map((item) => item.encounterId)).toEqual([
+        encounter?.encounterId,
+      ]);
+      expect(
+        (
+          await get(
+            `/api/v2/safety/encounters?mmsi=${CROSS_A}&risk=low`,
+            authority,
+          )
+        ).json<Page>().data,
+      ).toEqual([]);
+      expect(
+        (
+          await get(`/api/v2/safety/encounters?mmsi=${CROSS_A}`, viewerX)
+        ).json<Page>().data,
+      ).toEqual([]);
     });
 
     it('lists the detectors with their method ids and thresholds', async () => {
@@ -382,14 +567,26 @@ describe('safety service end to end (NATS → detectors → SAFETY / ALERTS / ta
           id: 'collision',
           enabled: true,
           methodIds: ['collision.cpa_tcpa'],
-          config: expect.objectContaining({ SEARCH_RADIUS_NM: 6, HIGH_CPA_NM: 0.25 }) as unknown,
+          config: expect.objectContaining({
+            SEARCH_RADIUS_NM: 6,
+            HIGH_CPA_NM: 0.25,
+          }) as unknown,
         }),
       ]);
     });
 
     it('requires safety:read', async () => {
-      expect((await service.app.inject({ method: 'GET', url: '/api/v2/safety/vessels' })).statusCode).toBe(401);
-      expect((await get('/api/v2/safety/vessels', { roles: [] })).statusCode).toBe(403);
+      expect(
+        (
+          await service.app.inject({
+            method: 'GET',
+            url: '/api/v2/safety/vessels',
+          })
+        ).statusCode,
+      ).toBe(401);
+      expect(
+        (await get('/api/v2/safety/vessels', { roles: [] })).statusCode,
+      ).toBe(403);
     });
   });
 });

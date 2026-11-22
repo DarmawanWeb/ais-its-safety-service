@@ -27,7 +27,7 @@ interface ProjectionSpec {
   readonly eventTypes: readonly EventType[];
   /** Applies one event; returns the entity id it concerns. */
   readonly apply: (event: AnyEventEnvelope) => Promise<string | undefined>;
-  /** Tombstones the live rows absent from the snapshot. */
+  /** Removes the rows absent from the snapshot. */
   readonly removeAbsent: (
     ids: readonly string[],
     startedAt: Date,
@@ -38,7 +38,7 @@ interface ProjectionSpec {
  * Rebuilds the `zones` and `vessels` projections from the compacted `GEO`
  * and `FLEET` streams at startup (spec §7.2: one message per entity). An
  * ordered `last_per_subject` replay re-applies every current snapshot (and
- * every deletion still in the stream) and tombstones the rows the stream no
+ * every deletion still in the stream) and removes the rows the stream no
  * longer knows, so the tables converge after a database restore, a stream
  * reset or a lost delivery — the durable consumers `safety-zones` /
  * `safety-fleet` only resume from their acknowledged position. Both writers
@@ -73,7 +73,7 @@ export class ProjectionRebuildService implements OnApplicationBootstrap {
         ],
         apply: (event) => this.projections.applyZone(event),
         removeAbsent: (ids, startedAt) =>
-          this.zones.markAbsentDeleted(ids, startedAt),
+          this.zones.deleteAbsent(ids, startedAt),
       }),
       this.rebuild({
         name: 'vessels',
@@ -85,7 +85,7 @@ export class ProjectionRebuildService implements OnApplicationBootstrap {
         ],
         apply: (event) => this.projections.applyVessel(event),
         removeAbsent: (ids, startedAt) =>
-          this.vessels.markAbsentDeleted(ids, startedAt),
+          this.vessels.deleteAbsent(ids, startedAt),
       }),
     ]);
   }

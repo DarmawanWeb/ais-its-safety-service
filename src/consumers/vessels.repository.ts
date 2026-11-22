@@ -96,21 +96,22 @@ export class VesselsRepository {
   }
 
   /**
-   * Tombstones live vessels absent from a complete stream snapshot that were
-   * not projected since the snapshot started.
+   * Removes the rows of vessels absent from a complete snapshot of the
+   * compacted stream. Such a row has no message left in the stream (not even
+   * a deletion), so nothing can resurrect it and no tombstone is needed; a
+   * later republication inserts it again. Rows projected since the snapshot
+   * started are kept (the durable consumer may have added them meanwhile).
    *
-   * @returns how many vessels were tombstoned.
+   * @returns how many rows were removed.
    */
-  async markAbsentDeleted(
+  async deleteAbsent(
     presentIds: readonly string[],
     snapshotStartedAt: Date,
   ): Promise<number> {
     const rows = await this.db
-      .update(vessels)
-      .set({ deletedAt: snapshotStartedAt, updatedAt: sql`now()` })
+      .delete(vessels)
       .where(
         and(
-          isNull(vessels.deletedAt),
           lt(vessels.updatedAt, snapshotStartedAt),
           sql`NOT (${vessels.id} = ANY (SELECT jsonb_array_elements_text(${JSON.stringify(presentIds)}::jsonb)::uuid))`,
         ),

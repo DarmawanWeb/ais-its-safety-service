@@ -8,7 +8,7 @@ import type {
   EncounterPositionsJson,
   EncounterVesselPosition,
 } from '../../../db/schema.js';
-import type { EncounterRow } from '../encounters.repository.js';
+import type { EncounterHistorySample, EncounterRecord } from '../encounter.js';
 
 /** A vessel report an encounter sample was computed from. */
 export class EncounterVesselPositionDto implements EncounterVesselPosition {
@@ -40,25 +40,13 @@ export class EncounterPositionsDto implements EncounterPositionsJson {
   readonly b!: EncounterVesselPositionDto;
 }
 
-/** One CPA/TCPA evaluation of a vessel pair at risk. */
+/** One CPA/TCPA evaluation of the pair. */
 export class EncounterSampleDto {
-  @ApiProperty({
-    format: 'uuid',
-    description: 'Groups the samples of one encounter',
-  })
-  readonly encounterId: string;
-
   @ApiProperty({
     format: 'date-time',
     description: 'Event time of the evaluation',
   })
   readonly time: string;
-
-  @ApiProperty({ example: 525005223, description: 'Lower MMSI of the pair' })
-  readonly mmsiA: number;
-
-  @ApiProperty({ example: 525005224, description: 'Higher MMSI of the pair' })
-  readonly mmsiB: number;
 
   @ApiProperty({ description: 'Distance at the closest point of approach, nm' })
   readonly cpaNm: number;
@@ -85,15 +73,69 @@ export class EncounterSampleDto {
   @ApiProperty({ type: EncounterPositionsDto })
   readonly positions: EncounterPositionsJson;
 
-  constructor(row: EncounterRow) {
-    this.encounterId = row.encounterId;
-    this.time = row.time.toISOString();
-    this.mmsiA = row.mmsiA;
-    this.mmsiB = row.mmsiB;
-    this.cpaNm = row.cpaNm;
-    this.tcpaMin = row.tcpaMin;
-    this.rangeNm = row.rangeNm;
-    this.risk = row.risk;
-    this.positions = row.positions;
+  constructor(sample: EncounterHistorySample) {
+    this.time = sample.time.toISOString();
+    this.cpaNm = sample.cpaNm;
+    this.tcpaMin = sample.tcpaMin;
+    this.rangeNm = sample.rangeNm;
+    this.risk = sample.risk;
+    this.positions = sample.positions;
+  }
+}
+
+/**
+ * A collision encounter of a vessel pair (from its first band above `none`
+ * to the return to `none`) with its CPA/TCPA history in the queried range.
+ */
+export class EncounterDto {
+  @ApiProperty({ format: 'uuid' })
+  readonly encounterId: string;
+
+  @ApiProperty({ example: 525005223, description: 'Lower MMSI of the pair' })
+  readonly mmsiA: number;
+
+  @ApiProperty({ example: 525005224, description: 'Higher MMSI of the pair' })
+  readonly mmsiB: number;
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'First sample in the range',
+  })
+  readonly startedAt: string;
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'Latest sample in the range',
+  })
+  readonly lastSampleAt: string;
+
+  @ApiProperty({
+    enum: COLLISION_RISKS,
+    description: 'Highest band of the samples in the range',
+  })
+  readonly peakRisk: CollisionRisk;
+
+  @ApiProperty({
+    description: 'Smallest CPA of the samples in the range, nm',
+  })
+  readonly minCpaNm: number;
+
+  @ApiProperty({
+    type: [EncounterSampleDto],
+    description: 'CPA/TCPA samples in the range, oldest first',
+  })
+  readonly history: EncounterSampleDto[];
+
+  constructor(record: EncounterRecord) {
+    this.encounterId = record.encounterId;
+    this.mmsiA = record.mmsiA;
+    this.mmsiB = record.mmsiB;
+    this.startedAt = record.startedAt.toISOString();
+    this.lastSampleAt = record.lastSampleAt.toISOString();
+    this.peakRisk = record.peakRisk;
+    this.minCpaNm = record.minCpaNm;
+    this.history = record.history.map(
+      (sample) => new EncounterSampleDto(sample),
+    );
   }
 }

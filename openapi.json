@@ -1,0 +1,1334 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/v2/safety/methodology": {
+      "get": {
+        "operationId": "MethodologyController_describe",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MethodologyDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Methods implemented by this service, with their sources",
+        "tags": [
+          "methodology"
+        ]
+      }
+    },
+    "/api/v2/safety/vessels": {
+      "get": {
+        "description": "Initial state of the live map (spec §9): latest EWS status, collision risk and closest encounter per vessel, ordered by MMSI, at most `limit` vessels with a position since `since`. Shared across tenants (spec §8.5).",
+        "operationId": "VesselStatesController_list",
+        "parameters": [
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84)",
+            "schema": {
+              "example": "112.5,-7.3,113,-6.8",
+              "type": "string"
+            }
+          },
+          {
+            "name": "ewsStatus",
+            "required": false,
+            "in": "query",
+            "description": "EWS statuses, comma separated (0 danger, 1 warning, 3 safe)",
+            "schema": {
+              "example": "0,1",
+              "type": "string"
+            }
+          },
+          {
+            "name": "collisionRisk",
+            "required": false,
+            "in": "query",
+            "description": "Collision risk bands, comma separated (none, low, medium, high)",
+            "schema": {
+              "example": "medium,high",
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "required": false,
+            "in": "query",
+            "description": "Only vessels with a position at or after this time (default: 24 h ago)",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 5000,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SafetyVesselStateDto"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Latest safety states of the vessels in a viewport",
+        "tags": [
+          "vessels"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
+    "/api/v2/safety/vessels/{mmsi}": {
+      "get": {
+        "operationId": "VesselStatesController_get",
+        "parameters": [
+          {
+            "name": "mmsi",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "minimum": 100000000,
+              "maximum": 999999999,
+              "example": 525005223,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafetyVesselStateDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Latest safety state of one vessel",
+        "tags": [
+          "vessels"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
+    "/api/v2/safety/events": {
+      "get": {
+        "description": "Newest first (default: the last 7 days, at most 366 days). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
+        "operationId": "EventsController_list",
+        "parameters": [
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Opaque cursor from `page.nextCursor` of the previous page",
+            "schema": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
+            "name": "detector",
+            "required": false,
+            "in": "query",
+            "description": "Detector id (`ews`, `collision`, …)",
+            "schema": {
+              "example": "ews",
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "critical"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "resolved"
+              ]
+            }
+          },
+          {
+            "name": "mmsi",
+            "required": false,
+            "in": "query",
+            "description": "Vessel, as mmsi or relatedMmsi",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the time-ordered list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "page"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SafetyEventDto"
+                      }
+                    },
+                    "page": {
+                      "$ref": "#/components/schemas/CursorPageInfoDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Safety events (EWS, collision) with their lifecycle",
+        "tags": [
+          "events"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
+    "/api/v2/safety/events/{id}": {
+      "get": {
+        "operationId": "EventsController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Event id = alert id",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafetyEventDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "One safety event",
+        "tags": [
+          "events"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
+    "/api/v2/safety/encounters": {
+      "get": {
+        "description": "Encounters of vessel pairs at risk with samples in the range (default: the last 24 h, at most 31 days), latest sample first, each with its CPA/TCPA history in the range. Tenancy (spec §8.5): authority and super_admin see every pair, other roles pairs with a vessel of their organization.",
+        "operationId": "EncountersController_list",
+        "parameters": [
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Opaque cursor from `page.nextCursor` of the previous page",
+            "schema": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "risk",
+            "required": false,
+            "in": "query",
+            "description": "Encounters whose highest band in the range is one of these, comma separated (none, low, medium, high)",
+            "schema": {
+              "example": "medium,high",
+              "type": "string"
+            }
+          },
+          {
+            "name": "mmsi",
+            "required": false,
+            "in": "query",
+            "description": "Either vessel of the pair",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "encounterId",
+            "required": false,
+            "in": "query",
+            "description": "One encounter",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the time-ordered list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "page"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EncounterDto"
+                      }
+                    },
+                    "page": {
+                      "$ref": "#/components/schemas/CursorPageInfoDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Collision encounters with their CPA/TCPA history",
+        "tags": [
+          "encounters"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
+    "/api/v2/safety/detectors": {
+      "get": {
+        "operationId": "DetectorsController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The detectors of this service with their method ids and active thresholds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DetectorDescriptionDto"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Detectors of this instance: method ids and active thresholds",
+        "tags": [
+          "detectors"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "AIS Maritime Intelligence — AIS ITS Safety Service",
+    "description": "Navigational safety analytics (pipeline Early Warning System, collision risk CPA/TCPA) built on the Detector SDK",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [
+    {
+      "name": "vessels",
+      "description": "Latest navigational safety state per vessel (EWS status, collision risk)"
+    },
+    {
+      "name": "events",
+      "description": "Detector events (EWS, collision) and their lifecycle"
+    },
+    {
+      "name": "encounters",
+      "description": "Collision encounters with their CPA/TCPA history"
+    },
+    {
+      "name": "detectors",
+      "description": "Detectors of the Detector SDK"
+    },
+    {
+      "name": "methodology",
+      "description": "Methods of the methodology catalog implemented here"
+    }
+  ],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http",
+        "description": "Access token (EdDSA JWT)"
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key sk_<id>_<secret>"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "Service-to-service token"
+      }
+    },
+    "schemas": {
+      "LocalizedTextDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Bahasa Indonesia"
+          },
+          "en": {
+            "type": "string",
+            "description": "English"
+          }
+        },
+        "required": [
+          "id",
+          "en"
+        ]
+      },
+      "MethodReferenceDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "imo-mepc-352-78"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true,
+            "format": "uri"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "url"
+        ]
+      },
+      "MethodSummaryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cii.attained"
+          },
+          "catalogued": {
+            "type": "boolean",
+            "description": "Whether the catalog shipped with @darmawanweb/ais-its-contracts describes the method"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "ais",
+              "emission",
+              "seemp",
+              "telemetry",
+              "geo",
+              "safety",
+              "surveillance"
+            ],
+            "nullable": true
+          },
+          "name": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LocalizedTextDto"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "implemented",
+              "planned",
+              "deprecated"
+            ],
+            "nullable": true
+          },
+          "needsCitation": {
+            "type": "boolean",
+            "description": "Values come from the thesis without a verified external source"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MethodReferenceDto"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "catalogued",
+          "domain",
+          "name",
+          "status",
+          "needsCitation",
+          "references"
+        ]
+      },
+      "MethodologyDto": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string",
+            "example": "safety"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MethodSummaryDto"
+            }
+          }
+        },
+        "required": [
+          "service",
+          "methods"
+        ]
+      },
+      "ClosestEncounterDto": {
+        "type": "object",
+        "properties": {
+          "otherMmsi": {
+            "type": "number",
+            "example": 525005224,
+            "description": "MMSI of the other vessel"
+          },
+          "cpaNm": {
+            "type": "number",
+            "example": 0.18,
+            "description": "Distance at the closest point of approach (CPA), nm"
+          },
+          "tcpaMin": {
+            "type": "number",
+            "example": 4.6,
+            "description": "Time to the closest point of approach (TCPA), minutes"
+          }
+        },
+        "required": [
+          "otherMmsi",
+          "cpaNm",
+          "tcpaMin"
+        ]
+      },
+      "SafetyVesselIdentityDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "KM Bahari Nusantara"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "SafetyVesselStateDto": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "number",
+            "example": 525005223
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the latest evaluation (SafetyVesselStateV1.time)"
+          },
+          "lat": {
+            "type": "number",
+            "example": -6.9277,
+            "description": "Latest latitude, degrees"
+          },
+          "lon": {
+            "type": "number",
+            "example": 112.7085,
+            "description": "Latest longitude, degrees"
+          },
+          "positionTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time of the latest position"
+          },
+          "sog": {
+            "type": "number",
+            "description": "Speed over ground, knots (102.3 = n/a)"
+          },
+          "cog": {
+            "type": "number",
+            "description": "Course over ground, degrees (360 = n/a)"
+          },
+          "hdg": {
+            "type": "number",
+            "description": "Heading, degrees (511 = n/a)"
+          },
+          "navstatus": {
+            "type": "number",
+            "description": "Reported AIS navigational status (0–15)"
+          },
+          "predictedNavstatus": {
+            "type": "number",
+            "enum": [
+              0,
+              1
+            ],
+            "description": "1 = predicted at anchor"
+          },
+          "ewsStatus": {
+            "type": "number",
+            "enum": [
+              0,
+              1,
+              3
+            ],
+            "description": "Pipeline EWS status: 0 danger, 1 warning, 3 safe"
+          },
+          "pipelineDistanceM": {
+            "type": "number",
+            "nullable": true,
+            "description": "Distance to the nearest active pipeline, meters"
+          },
+          "nearestPipelineZoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "collisionRisk": {
+            "type": "string",
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "closestEncounter": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClosestEncounterDto"
+              }
+            ]
+          },
+          "methodIds": {
+            "example": [
+              "ews.pipeline_distance_status",
+              "collision.cpa_tcpa"
+            ],
+            "description": "Methodology catalog ids behind the state (spec §17)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "vessel": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SafetyVesselIdentityDto"
+              }
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "mmsi",
+          "time",
+          "lat",
+          "lon",
+          "positionTime",
+          "sog",
+          "cog",
+          "hdg",
+          "navstatus",
+          "predictedNavstatus",
+          "ewsStatus",
+          "pipelineDistanceM",
+          "nearestPipelineZoneId",
+          "collisionRisk",
+          "closestEncounter",
+          "methodIds",
+          "vessel",
+          "updatedAt"
+        ]
+      },
+      "SafetyEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the condition occurred"
+          },
+          "detector": {
+            "type": "string",
+            "example": "ews",
+            "description": "Detector that raised it"
+          },
+          "type": {
+            "type": "string",
+            "example": "ews",
+            "description": "Alert type (contracts ALERT_TYPES)"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Severity of the published alert"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence (lower after a de-escalation)"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "mmsi": {
+            "type": "number",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "number",
+            "nullable": true,
+            "description": "Other vessel (collision)"
+          },
+          "zoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Zone (EWS: the pipeline)"
+          },
+          "lat": {
+            "type": "number",
+            "nullable": true
+          },
+          "lon": {
+            "type": "number",
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "ews.pipeline_distance_status",
+            "description": "Methodology catalog id of the rule (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "ews:525005223:0195f3c4-…"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Detector specific details (distances, thresholds, CPA/TCPA, …)"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the occurrence opened"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resolution": {
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true,
+            "description": "Why and how it ended (`reason`, last measurements)"
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "type",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "status",
+          "mmsi",
+          "relatedMmsi",
+          "zoneId",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "data",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "resolution"
+        ]
+      },
+      "CursorPageInfoDto": {
+        "type": "object",
+        "properties": {
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Opaque cursor of the next page; null on the last page"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [
+          "nextCursor",
+          "limit"
+        ]
+      },
+      "EncounterVesselPositionDto": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "number",
+            "example": 525005223
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time of the report"
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lon": {
+            "type": "number"
+          },
+          "sog": {
+            "type": "number",
+            "description": "Speed over ground, knots"
+          },
+          "cog": {
+            "type": "number",
+            "description": "Course over ground, degrees"
+          }
+        },
+        "required": [
+          "mmsi",
+          "time",
+          "lat",
+          "lon",
+          "sog",
+          "cog"
+        ]
+      },
+      "EncounterPositionsDto": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "$ref": "#/components/schemas/EncounterVesselPositionDto"
+          },
+          "b": {
+            "$ref": "#/components/schemas/EncounterVesselPositionDto"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ]
+      },
+      "EncounterSampleDto": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the evaluation"
+          },
+          "cpaNm": {
+            "type": "number",
+            "description": "Distance at the closest point of approach, nm"
+          },
+          "tcpaMin": {
+            "type": "number",
+            "nullable": true,
+            "description": "Time to the closest point of approach, minutes (null: no relative motion)"
+          },
+          "rangeNm": {
+            "type": "number",
+            "description": "Range between the vessels at the evaluation, nm"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "Risk band after hysteresis"
+          },
+          "positions": {
+            "$ref": "#/components/schemas/EncounterPositionsDto"
+          }
+        },
+        "required": [
+          "time",
+          "cpaNm",
+          "tcpaMin",
+          "rangeNm",
+          "risk",
+          "positions"
+        ]
+      },
+      "EncounterDto": {
+        "type": "object",
+        "properties": {
+          "encounterId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mmsiA": {
+            "type": "number",
+            "example": 525005223,
+            "description": "Lower MMSI of the pair"
+          },
+          "mmsiB": {
+            "type": "number",
+            "example": 525005224,
+            "description": "Higher MMSI of the pair"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "First sample in the range"
+          },
+          "lastSampleAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Latest sample in the range"
+          },
+          "peakRisk": {
+            "type": "string",
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "Highest band of the samples in the range"
+          },
+          "minCpaNm": {
+            "type": "number",
+            "description": "Smallest CPA of the samples in the range, nm"
+          },
+          "history": {
+            "description": "CPA/TCPA samples in the range, oldest first",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EncounterSampleDto"
+            }
+          }
+        },
+        "required": [
+          "encounterId",
+          "mmsiA",
+          "mmsiB",
+          "startedAt",
+          "lastSampleAt",
+          "peakRisk",
+          "minCpaNm",
+          "history"
+        ]
+      },
+      "DetectorDescriptionDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "ews",
+            "description": "Detector id (`DETECTORS` entry)"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "methodIds": {
+            "example": [
+              "ews.pipeline_distance_status"
+            ],
+            "description": "Methodology catalog ids (spec §17)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "alertTypes": {
+            "nullable": true,
+            "example": [
+              "ews"
+            ],
+            "description": "Alert types the detector raises; null when undeclared",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Enabled by `DETECTORS` in this instance"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true,
+            "example": {
+              "DANGER_M": 500,
+              "WARNING_M": 1750
+            },
+            "description": "Active `<ID>_*` configuration (thresholds); null when disabled"
+          },
+          "tickIntervalMs": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Tick interval of `onTick`, ms; null without ticks"
+          }
+        },
+        "required": [
+          "id",
+          "domain",
+          "methodIds",
+          "alertTypes",
+          "enabled",
+          "config",
+          "tickIntervalMs"
+        ]
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Problem type URI"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Request path",
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$",
+            "description": "Stable UPPER_SNAKE_CASE error code"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "description": "Dot separated path, e.g. \"positions.0.lat\""
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "description": "Machine readable reason",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ],
+              "additionalProperties": false,
+              "description": "Field-level validation error"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "additionalProperties": {},
+        "description": "RFC 9457 problem details"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}

@@ -47,6 +47,12 @@ import {
   type VesselCollisionSummary,
 } from './encounter-tracker.js';
 
+/** `value` with `digits` decimals for alert texts, without a negative zero ("-0.0"). */
+function fixed(value: number, digits: number): string {
+  const factor = 10 ** digits;
+  return (Math.round(value * factor) / factor || 0).toFixed(digits);
+}
+
 /** Interval of the housekeeping tick (stale pairs, orphaned alerts), ms. */
 export const COLLISION_TICK_MS = 30_000;
 
@@ -291,7 +297,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
           reason:
             measurement === undefined
               ? closeReason
-              : `risk ${current?.risk ?? 'none'} (CPA ${measurement.cpaNm.toFixed(2)} nm, TCPA ${measurement.tcpaMin === null ? 'n/a' : `${measurement.tcpaMin.toFixed(1)} min`})`,
+              : `risk ${current?.risk ?? 'none'} (CPA ${fixed(measurement.cpaNm, 2)} nm, TCPA ${measurement.tcpaMin === null ? 'n/a' : `${fixed(measurement.tcpaMin, 1)} min`})`,
           data:
             measurement === undefined
               ? { risk: 'none' }
@@ -376,7 +382,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
       mmsi: encounter.mmsiA,
       relatedMmsi: encounter.mmsiB,
       title: `${collisionRiskLabel(encounter.risk)} of collision: ${labelA} and ${labelB}`,
-      message: `CPA ${measurement.cpaNm.toFixed(2)} nm in ${measurement.tcpaMin.toFixed(1)} min (range ${measurement.rangeNm.toFixed(2)} nm)`,
+      message: `CPA ${fixed(measurement.cpaNm, 2)} nm in ${fixed(measurement.tcpaMin, 1)} min (range ${fixed(measurement.rangeNm, 2)} nm)`,
       position: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 },
       occurredAt: measurement.at,
       zoneId: null,
