@@ -41,6 +41,14 @@ web app's backend gaps, and the hardening after the 0.1.0 review. **Deploy after
   detector's event clock (the AIS time of its newest evaluation, never later than the request
   time); an encounter followed by a newer one of its pair (a takeover or restart) has ended. The
   cursor keeps the cut-off.
+- REST: `GET /safety/stats?bbox&since` for dashboards (the web app listed
+  `GET /safety/vessels?ewsStatus=0,1&limit=5000` and counted in the browser) →
+  `{ ews: { danger, warning, methodId }, collision: { high, medium, methodId }, since, at }`: the
+  vessels in EWS danger / warning and those with a `high` / `medium` collision risk among the
+  states `GET /safety/vessels` lists for the same window (default 24 h, same validation), without
+  its `limit`. One statement over the existing partial index `vessel_state_at_risk_idx` (no
+  migration); the same counts for every reader with `safety:read`, since the states are shared
+  (spec §8.5). A 0.1.0 replica answers `404` while a rollout is in progress.
 - `DETECTOR_PINNED_TTL_MS` (default 30 000, the kit's): pinned TTL of the exclusive position
   consumer, i.e. the failover time when the active instance dies.
 - Migration `0002_private_pipelines_open_events`: `vessel_state.nearest_pipeline_org_id`
@@ -52,7 +60,11 @@ web app's backend gaps, and the hardening after the 0.1.0 review. **Deploy after
   runner (`test/resolutions.int.test.ts`), active encounters across a takeover and with AIS time
   behind the wall clock (`test/encounters.int.test.ts`), harness tests for resolution events,
   activation and standby, `onRepeated`, texts, CPA positions and active encounters, the sanitized
-  log of a failed projection rebuild.
+  log of a failed projection rebuild; `GET /safety/stats` over seeded states (window, the same
+  counts as the filtered list, every role, validation, the plan on the partial index:
+  `test/stats.int.test.ts`). `test/encounters.int.test.ts` starts from an empty `AIS_POSITION`
+  stream: its new durable replayed the positions of the files that ran before, which moved the
+  global event clocks ahead of its lagging AIS time in some file orders.
 
 ### Changed
 

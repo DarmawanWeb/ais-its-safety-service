@@ -28,7 +28,8 @@ repository [`ais-its-platform`](https://github.com/DarmawanWeb/ais-its-platform)
   again or misses one resolved elsewhere.
 - **REST API** `/api/v2/safety/*` for the live map (initial safety states, active encounters with
   their predicted CPA points), the safety pages of the web app (events, encounters, with vessel
-  identities and localizable texts) and traceability (detectors, methodology).
+  identities and localizable texts), dashboards (counts of the vessels at risk) and traceability
+  (detectors, methodology).
 
 Not here: AIS decoding and navstatus prediction (ais-pipeline), zones (geo), vessels (fleet), alert
 inbox, rules and delivery (notification), illegal-activity detectors (surveillance).
@@ -94,7 +95,7 @@ are published, consumers drain, the state writer flushes, NATS drains and the po
 | `src/detectors/detector-events.repository.ts` | `AlertPersistence` hook: the `events` table (one open row per key, event-time `last_seen_at`)   |
 | `src/detectors/alert-text.ts`                 | localizable texts: the `messageKey` constants and their `messageParams`                         |
 | `src/domain/`                                 | pure functions with `@method` TSDoc: `ews.ts`, `cpa.ts`, `collision-risk.ts`, `safety-state.ts` |
-| `src/modules/vessel-states/`                  | `SafetyStateWriter` (producer of `SAFETY`), `GET /safety/vessels[/:mmsi]`                       |
+| `src/modules/vessel-states/`                  | `SafetyStateWriter` (producer of `SAFETY`), `GET /safety/vessels[/:mmsi]`, `GET /safety/stats`  |
 | `src/modules/events/`                         | `GET /safety/events[/:id]`                                                                      |
 | `src/modules/encounters/`                     | encounter recorder (detector sink) and `GET /safety/encounters`                                 |
 | `src/modules/methodology/`                    | `GET /safety/methodology` from the contracts catalog                                            |
@@ -150,13 +151,15 @@ instance that lost its pin while finishing a position). `time`, `opened_at`, `la
 (the kit's `onRepeated`, at most every 60 s of event time), de-escalations and reopenings, never
 moves back and is not moved by the resolution. `data` and `resolution` carry the localizable text
 (`messageKey`, `messageParams`, [below](#localizable-texts)) of the alert and of its end.
-`nearest_pipeline_org_id` (migration `0002`) records the owner of an org-owned pipeline zone: the
-REST API shows that zone and its distance to the owner and to authorities only, and the shared
-`SAFETY` stream never carries them. Migration `0003` indexes `vessel_state.collision_evaluated_at`
-(partial, non-null): its maximum is the collision detector's event clock, against which
-`GET /safety/encounters?active` measures its window. Encounters group samples by `encounter_id`
-from the first band above `none` to the return to `none`; an unchanged band is sampled at most every
-`COLLISION_SAMPLE_INTERVAL_S`.
+The partial index `vessel_state_at_risk_idx` (`0001`, states with an EWS status other than safe
+or a collision band above `none`) serves `GET /safety/stats`: the counts read the few vessels at
+risk, not every state. `nearest_pipeline_org_id` (migration `0002`) records the owner of an
+org-owned pipeline zone: the REST API shows that zone and its distance to the owner and to
+authorities only, and the shared `SAFETY` stream never carries them. Migration `0003` indexes
+`vessel_state.collision_evaluated_at` (partial, non-null): its maximum is the collision detector's
+event clock, against which `GET /safety/encounters?active` measures its window. Encounters group
+samples by `encounter_id` from the first band above `none` to the return to `none`; an unchanged
+band is sampled at most every `COLLISION_SAMPLE_INTERVAL_S`.
 
 ## API
 
@@ -168,6 +171,7 @@ stable `code`). Every route requires a signed-in user (global default-deny guard
 | ------ | ------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET    | `/api/v2/safety/vessels`        | `safety:read`                      | latest safety states `?bbox&ewsStatus=0,1&collisionRisk=medium,high&since&limit` (array, by MMSI; default: positions of the last 24 h, ≤ 5 000), with `vessel` `{ id, name, typeCode }` and `nearestPipeline` `{ id, code, name }`                                                                                          |
 | GET    | `/api/v2/safety/vessels/:mmsi`  | `safety:read`                      | one vessel's state; `404 SAFETY_STATE_NOT_FOUND`; `400 VALIDATION_FAILED` (`field: 'mmsi'`) unless 9 digits                                                                                                                                                                                                                 |
+| GET    | `/api/v2/safety/stats`          | `safety:read`                      | vessels at risk `?bbox&since` → `{ ews: { danger, warning, methodId }, collision: { high, medium, methodId }, since, at }`: the states `GET /safety/vessels` lists for the same window (default 24 h), counted in the database without its `limit` (**Stats** below)                                                        |
 | GET    | `/api/v2/safety/events`         | `safety:read`                      | detector events `?detector&severity&status&mmsi&from&to&bbox&cursor&limit`, newest first (default 7 days, ≤ 366 days; `status=open` without `from`: every open occurrence), cursor page; `vessel` / `relatedVessel` identities, texts in `data` / `resolution`                                                              |
 | GET    | `/api/v2/safety/events/:id`     | `safety:read`                      | one event; `404 SAFETY_EVENT_NOT_FOUND` (also outside the tenancy); `400 VALIDATION_FAILED` (`field: 'id'`) for a malformed UUID                                                                                                                                                                                            |
 | GET    | `/api/v2/safety/encounters`     | `safety:read`                      | collision encounters with CPA/TCPA history `?from&to&risk&mmsi&encounterId&active&bbox&cursor&limit` (newest encounter first, default 24 h, ≤ 31 days; `risk` = peak band; the cursor keeps the first page's window and `active` cut-off); `vesselA` / `vesselB`, `messageKey` / `messageParams`, per sample `cpaPositions` |
@@ -179,15 +183,29 @@ stable `code`). Every route requires a signed-in user (global default-deny guard
 Tenancy (spec §8.5): safety **states** are shared across tenants, except the nearest pipeline when
 it is an org-owned zone: `nearestPipelineZoneId`, `nearestPipeline` and `pipelineDistanceM` are
 `null` for readers outside that organization (authority and super_admin see them; the EWS status
-stays shared). **Vessel identities** (`vessel`, `relatedVessel`, `vesselA`, `vesselB`:
-`{ id, name, typeCode }` of the `vessels` projection, `null` for an unregistered MMSI) are shared
-across tenants like the vessel registry, so the reader of a collision event sees both vessels.
+stays shared). The counts of `GET /safety/stats` are therefore the same for every reader, a
+vessel warned by another organization's pipeline included. **Vessel identities** (`vessel`,
+`relatedVessel`, `vesselA`, `vesselB`: `{ id, name, typeCode }` of the `vessels` projection,
+`null` for an unregistered MMSI) are shared across tenants like the vessel registry, so the reader
+of a collision event sees both vessels.
 Org-owned pipeline zones only apply to their organization's vessels, so their alerts reach that
 organization alone; alert data carries no owner organizations. **Events and encounters** are
 visible to `authority` and `super_admin` in full; other roles see only those whose `mmsi` or
 `relatedMmsi` (encounters: either vessel) belongs to a vessel of their active organization, from the
 `vessels` projection of `FLEET` — the organization comes from the token, never from the request. A
 principal without an organization sees none.
+
+**Stats.** `GET /safety/stats` counts, among the vessels with a position at or after `since`
+(default 24 h before the request) in `bbox` (optional) — exactly the window of
+`GET /safety/vessels`, whose validation it shares — the vessels whose latest EWS status is danger
+(`0`) or warning (`1`) and those whose latest collision risk is `high` or `medium` (the bands that
+raise alerts; `low` and `none` are not counted). A vessel counts in both groups when both apply.
+One statement over the partial index `vessel_state_at_risk_idx` (no `limit`: the list's 10 000 cap
+does not apply). The response echoes the `since` applied, `at` is when the counts were taken, and
+each group names its method (`ews.pipeline_distance_status`, `collision.cpa_tcpa`). The counts
+follow the stored states: a vessel that stops reporting keeps its last EWS status until `since`
+passes it (see the parity notes), a collision band falls back once the detector closes the pair.
+Status filters and `limit` are refused (`400 VALIDATION_FAILED`).
 
 **Encounter filters and fields.** `active=true` keeps the encounters still in progress, judged per
 pair: the newest encounter of a pair is active while its latest sample has a band above `none` and
@@ -398,7 +416,9 @@ deployments that run several replicas themselves.
 
 **Rollout order** with kit 0.3 / contracts 0.4: deploy notification (which handles
 `alert.resolved.v1`) first, then this service; resolutions published to an older notification are
-acknowledged and skipped.
+acknowledged and skipped. While a rollout from 0.1.0 is in progress, a request that reaches a
+0.1.0 replica answers `404` for `GET /safety/stats` (added in 0.2.0); clients retry on their next
+refresh.
 
 ### Deployment: one deployment per detector
 
@@ -490,7 +510,9 @@ To try the detectors locally, publish a `pipeline` zone (`geo.zone.upserted.v1`)
   - `src/consumers/projection-rebuild.service.spec.ts` — a failed rebuild is logged without the
     bound values of the statement (`sanitizeError`).
   - `src/modules/vessel-states/safety-state.writer.spec.ts` — batching, heartbeat, retries;
-    `src/common/tenancy.spec.ts` — scopes and the visibility of org-owned pipelines.
+    `vessel-states.service.spec.ts` — the stats window (default 24 h, the list's `bbox` / `since`)
+    and the response with its method ids; `src/common/tenancy.spec.ts` — scopes and the
+    visibility of org-owned pipelines.
 - **Integration tests** (`pnpm test:int`, Docker): the real `AppModule` against
   `timescale/timescaledb-ha:pg17` and `nats:2.11-alpine` started once by
   `test/support/global-setup.ts`, signed test JWTs:
@@ -505,13 +527,20 @@ To try the detectors locally, publish a `pipeline` zone (`geo.zone.upserted.v1`)
     pin), B activates before its first position with A's open occurrences (forgets what A resolved,
     takes over what A raised), raises nothing twice (stream contents by event type) and announces
     its own resolution once with the `alert.resolved.v1` contract fields.
-  - `test/encounters.int.test.ts` — `active` judged per pair and in event time: positions 10 min
-    behind the wall clock stay active until the detector's clock passes the window; across a
-    takeover (A stops, B follows the pair with a new encounter) only the newest encounter of the
-    pair is active, the previous one is listed as ended.
+  - `test/encounters.int.test.ts` — `active` judged per pair and in event time (from an empty
+    `AIS_POSITION` stream: a new durable replays it, and the global clocks must not see the
+    positions of other files): positions 10 min behind the wall clock stay active until the
+    detector's clock passes the window; across a takeover (A stops, B follows the pair with a new
+    encounter) only the newest encounter of the pair is active, the previous one is listed as
+    ended.
   - `test/resolutions.int.test.ts` — `ALERT_COOLDOWN_S=3` with the real runner: one
     `alert.resolved.v1` once the cooldown since the raise passed (not before), none when the
     condition returns within it (reopened, one open row).
+  - `test/stats.int.test.ts` — `GET /safety/stats` over seeded states: the default 24 h window,
+    `since`, `bbox`, the same counts as the filtered `GET /safety/vessels`, the same counts for
+    every role (also for a vessel warned by another organization's pipeline), validation and
+    permission, and the plan on 20 000 states (the partial index `vessel_state_at_risk_idx`, no
+    sequential scan).
   - `test/tenancy.int.test.ts` — an org-owned pipeline: no EWS for another organization's vessel;
     the owner's vessel is warned, the zone and distance are `null` on `SAFETY` and in REST for
     other tenants, the event is visible to the owner only, no owner organizations in alert data.

@@ -37,12 +37,33 @@ export interface VesselStateRecord {
   readonly updatedAt: Date;
 }
 
-/** Filters of `GET /safety/vessels`. */
-export interface VesselStateFilter {
+/**
+ * The vessels `GET /safety/vessels` lists and `GET /safety/stats` counts:
+ * those with a position at or after `since`, in `bbox` when given.
+ */
+export interface VesselStateWindow {
   readonly bbox?: BBox | undefined;
-  readonly ewsStatuses?: readonly EwsStatus[] | undefined;
-  readonly collisionRisks?: readonly CollisionRisk[] | undefined;
   /** Only vessels with a position at or after this time. */
   readonly since: Date;
+}
+
+/** Filters of `GET /safety/vessels`. */
+export interface VesselStateFilter extends VesselStateWindow {
+  readonly ewsStatuses?: readonly EwsStatus[] | undefined;
+  readonly collisionRisks?: readonly CollisionRisk[] | undefined;
   readonly limit: number;
+}
+
+/** Vessels per alerting EWS status and collision band (`VesselStatesRepository.countAtRisk`). */
+export interface AtRiskCounts {
+  readonly ews: { readonly danger: number; readonly warning: number };
+  readonly collision: { readonly high: number; readonly medium: number };
+}
+
+/** `GET /safety/stats`: the counts of a window and when they were taken. */
+export interface SafetyStatsRecord extends AtRiskCounts {
+  /** Lower bound of the position time of the counted vessels. */
+  readonly since: Date;
+  /** When the counts were taken. */
+  readonly at: Date;
 }
