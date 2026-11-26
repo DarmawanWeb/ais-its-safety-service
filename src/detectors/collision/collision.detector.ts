@@ -140,9 +140,15 @@ function riskOfSeverity(
  * made, and alert operations of one key are serialized by the emitter. The
  * tracker starts over whenever this instance becomes the active one
  * (`onActivated`, after the runner reloaded the open alerts from `events`),
- * seeded by the open alerts like after a restart. Resolutions are announced
- * with `alert.resolved.v1` by the runner (after the alert cooldown since the
- * last raise).
+ * seeded by the open alerts like after a restart. When it ends the alert of
+ * a pair it does not follow — one restored that way, resolved because the
+ * pair was evaluated without risk or is no longer evaluated — the stored band
+ * of each vessel of the pair it follows no other pair of falls back to
+ * `none` (`resetCollision`): that band was written by the instance that
+ * followed the pair, and a vessel that never reports again would keep it.
+ * Resolutions are announced with
+ * `alert.resolved.v1` by the runner (after the alert cooldown since the last
+ * raise).
  *
  * @method collision.cpa_tcpa
  * @see docs/METHODOLOGY.md §6.1 (`collision.cpa_tcpa`)
@@ -185,7 +191,9 @@ export class CollisionDetector implements Detector<CollisionConfig> {
    * This instance became the active one (startup or failover; the runner
    * reloaded the open alerts first): the pair tracker starts over, so pairs
    * another instance followed meanwhile get new encounters, seeded by the
-   * open alerts' severities.
+   * open alerts' severities. The stored bands stay: a pair still reporting
+   * is evaluated again within seconds; those of a pair that is not fall back
+   * when its alert is resolved.
    */
   onActivated(): void {
     this.tracker.clear();
@@ -199,7 +207,8 @@ export class CollisionDetector implements Detector<CollisionConfig> {
    * not evaluated within `COLLISION_MAX_AGE_S` (neither vessel reported) and
    * resolves open alerts whose pair is not tracked and whose last signal
    * (`OpenAlert.lastOccurredAt`) is older than that window (restored at
-   * startup or after a takeover, or left open by a failed resolution).
+   * startup or after a takeover, or left open by a failed resolution); the
+   * stored bands of their vessels fall back ({@link fallBack}).
    */
   onTick(context: DetectorContext<CollisionConfig>): Promise<void> {
     return this.housekeeping(context);
@@ -218,7 +227,8 @@ export class CollisionDetector implements Detector<CollisionConfig> {
     remember(position.mmsi);
 
     const transitions: EncounterTransition[] = [];
-    const orphans: string[] = [];
+    /** Open alerts of untracked pairs evaluated without risk, with the neighbour. */
+    const orphans: { readonly key: string; readonly other: number }[] = [];
     const evaluated = new Set<string>();
     const ownExclusion = collisionExclusion(position, config.MIN_SOG_KN);
     if (ownExclusion === null) {
@@ -253,7 +263,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         );
         if (transition !== undefined) transitions.push(transition);
         else if (tracked === undefined && context.alerts.isOpen(key))
-          orphans.push(key);
+          orphans.push({ key, other: other.mmsi });
       }
     }
     for (const key of this.tracker.keysOf(position.mmsi)) {
@@ -280,12 +290,14 @@ export class CollisionDetector implements Detector<CollisionConfig> {
             }),
           };
     await this.settle(context, transitions, position.time, end);
-    for (const key of orphans) {
+    for (const { key, other } of orphans) {
       await context.alerts.resolve(key, {
         at: position.time,
         reason: 'no collision risk',
         data: { ...localizable(MESSAGE_KEYS.collisionResolvedNoRisk) },
       });
+      // The evaluated vessel is reported below; the neighbour's summary did not change here.
+      this.fallBack([other], position.time);
     }
     this.report(context, before, position.time, position);
     await this.store(transitions);
@@ -324,6 +336,7 @@ export class CollisionDetector implements Detector<CollisionConfig> {
         reason: 'pair no longer evaluated',
         data: { ...localizable(MESSAGE_KEYS.collisionResolvedNotEvaluated) },
       });
+      this.fallBack([open.mmsi, open.relatedMmsi], eventTime);
     }
     this.report(context, before, eventTime);
     for (const [mmsi, at] of this.reportedAt)
@@ -414,6 +427,27 @@ export class CollisionDetector implements Detector<CollisionConfig> {
           evaluatedAt: new Date(evaluatedAt),
         },
       });
+    }
+  }
+
+  /**
+   * Vessels of a pair whose alert this instance ended without following the
+   * pair (see {@link onActivated}): their stored collision part may still be
+   * the band of the instance that followed it, which this one never reports
+   * (only changes of its own summaries are reported). Each vessel this
+   * instance follows no pair of falls back to `none`; the writer keeps a
+   * newer stored evaluation, and the vessel's reports stay monotonic in
+   * event time, so a later report of this instance wins.
+   */
+  private fallBack(mmsis: readonly (number | null)[], at: Date): void {
+    for (const mmsi of mmsis) {
+      if (mmsi === null || this.tracker.keysOf(mmsi).length > 0) continue;
+      const evaluatedAt = Math.max(
+        at.getTime(),
+        this.reportedAt.get(mmsi) ?? 0,
+      );
+      this.reportedAt.set(mmsi, evaluatedAt);
+      this.states.resetCollision({ mmsi, evaluatedAt: new Date(evaluatedAt) });
     }
   }
 

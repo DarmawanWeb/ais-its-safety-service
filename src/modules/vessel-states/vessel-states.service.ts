@@ -13,7 +13,12 @@ import {
   type ListVesselStatesQuery,
   VESSEL_STATES_DEFAULT_SINCE_MS,
 } from './dto/list-vessel-states.query.js';
-import type { VesselStateRecord } from './vessel-state.js';
+import type { SafetyStatsQuery } from './dto/safety-stats.query.js';
+import type {
+  SafetyStatsRecord,
+  VesselStateRecord,
+  VesselStateWindow,
+} from './vessel-state.js';
 import { VesselStatesRepository } from './vessel-states.repository.js';
 
 /** Error code of an unknown vessel safety state. */
@@ -38,16 +43,27 @@ export class VesselStatesService {
   ): Promise<VesselStateRecord[]> {
     const scope = safetyReadScope(principal);
     const states = await this.states.list({
-      bbox: bboxOf(query),
+      ...windowOf(query, now),
       ewsStatuses: query.ewsStatus,
       collisionRisks: query.collisionRisk,
-      since:
-        query.since === undefined
-          ? new Date(now.getTime() - VESSEL_STATES_DEFAULT_SINCE_MS)
-          : new Date(query.since),
       limit: query.limit,
     });
     return states.map((state) => visibleTo(scope, state));
+  }
+
+  /**
+   * Vessels at risk among the states of the window `list` reads, counted in
+   * the database (no `limit`). The same for every reader: the states are
+   * shared across tenants and the only private part of a state, an org-owned
+   * nearest pipeline, is not counted (its EWS status is shared, spec §8.5).
+   */
+  async stats(
+    query: SafetyStatsQuery,
+    now: Date = new Date(),
+  ): Promise<SafetyStatsRecord> {
+    const window = windowOf(query, now);
+    const counts = await this.states.countAtRisk(window);
+    return { ...counts, since: window.since, at: now };
   }
 
   /**
@@ -66,6 +82,20 @@ export class VesselStatesService {
     }
     return visibleTo(safetyReadScope(principal), state);
   }
+}
+
+/** The window of a list or stats query: `bbox` and `since` (default: 24 h before `now`). */
+function windowOf(
+  query: Pick<ListVesselStatesQuery, 'bbox' | 'since'>,
+  now: Date,
+): VesselStateWindow {
+  return {
+    bbox: bboxOf(query),
+    since:
+      query.since === undefined
+        ? new Date(now.getTime() - VESSEL_STATES_DEFAULT_SINCE_MS)
+        : new Date(query.since),
+  };
 }
 
 /** The state without an org-owned pipeline the reader may not see (zone id, identity and distance). */

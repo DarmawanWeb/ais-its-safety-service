@@ -9,13 +9,16 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
+  buildMessage,
+  IS_ISO8601,
   IsArray,
   IsIn,
   IsInt,
-  IsISO8601,
+  isISO8601,
   IsOptional,
   Max,
   Min,
+  ValidateBy,
 } from 'class-validator';
 
 /** Default and largest `limit` of `GET /safety/vessels` (a map viewport seed). */
@@ -24,6 +27,29 @@ export const VESSEL_STATES_MAX_LIMIT = 10_000;
 
 /** Default `since`: vessels with a position in the last 24 h. */
 export const VESSEL_STATES_DEFAULT_SINCE_MS = 24 * 60 * 60_000;
+
+/**
+ * An ISO-8601 date-time that `Date` reads: `IsISO8601({ strict: true,
+ * strictSeparator: true })` also accepts forms `Date` cannot parse (week and
+ * ordinal dates, the basic format, hour-only or colon-less times, comma
+ * fractions, signed years), which would reach the query as an invalid date
+ * and fail with `500` instead of `400`. Same constraint (`code`) as
+ * `IsISO8601`.
+ */
+export function IsIsoDateTime(): PropertyDecorator {
+  return ValidateBy({
+    name: IS_ISO8601,
+    validator: {
+      validate: (value: unknown) =>
+        typeof value === 'string' &&
+        isISO8601(value, { strict: true, strictSeparator: true }) &&
+        !Number.isNaN(Date.parse(value)),
+      defaultMessage: buildMessage(
+        (each) => `${each}$property must be a valid ISO 8601 date-time`,
+      ),
+    },
+  });
+}
 
 /** Splits a comma separated query value (`0,1`) into trimmed items. */
 function commaList({ value }: { value: unknown }): unknown {
@@ -78,7 +104,7 @@ export class ListVesselStatesQuery {
       'Only vessels with a position at or after this time (default: 24 h ago)',
   })
   @IsOptional()
-  @IsISO8601({ strict: true, strictSeparator: true })
+  @IsIsoDateTime()
   readonly since?: string;
 
   @ApiPropertyOptional({

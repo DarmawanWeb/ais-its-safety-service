@@ -60,6 +60,30 @@ export interface SafetyStateReport {
   readonly collision?: CollisionStatePart | undefined;
 }
 
+/**
+ * A vessel whose stored collision band no evaluation backs any more: the
+ * `collision` detector follows no pair of it and ended the alert of a pair
+ * it did not follow (one restored after a takeover or restart whose vessels
+ * this instance never evaluated again). Its collision part falls back to
+ * `none` without a closest encounter as of `evaluatedAt` — a part like a
+ * report's: it replaces only a stored part that is not newer. It carries no
+ * kinematics: a vessel without a stored state is left alone.
+ */
+export interface CollisionReset {
+  readonly mmsi: number;
+  /** Event time of the reset (newest part wins). */
+  readonly evaluatedAt: Date;
+}
+
+/** The collision part a {@link CollisionReset} stores. */
+export function collisionResetPart(reset: CollisionReset): CollisionStatePart {
+  return {
+    collisionRisk: 'none',
+    closestEncounter: null,
+    evaluatedAt: reset.evaluatedAt,
+  };
+}
+
 function newer<Part extends { readonly evaluatedAt: Date }>(
   a: Part | undefined,
   b: Part | undefined,
@@ -67,6 +91,14 @@ function newer<Part extends { readonly evaluatedAt: Date }>(
   if (a === undefined) return b;
   if (b === undefined) return a;
   return b.evaluatedAt.getTime() >= a.evaluatedAt.getTime() ? b : a;
+}
+
+/** The newer of two collision parts of one vessel (`later` on a tie), like {@link mergeSafetyReports}. */
+export function newerCollisionPart(
+  earlier: CollisionStatePart | undefined,
+  later: CollisionStatePart | undefined,
+): CollisionStatePart | undefined {
+  return newer(earlier, later);
 }
 
 /** Merges two reports of one vessel: newest kinematics, newest EWS part, newest collision part. */

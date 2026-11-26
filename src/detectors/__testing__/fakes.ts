@@ -1,19 +1,27 @@
 import { MetricsService } from '@darmawanweb/ais-its-nest/metrics';
 
 import { SafetyMetrics } from '../../common/safety.metrics.js';
-import type { SafetyStateReport } from '../../domain/safety-state.js';
+import type {
+  CollisionReset,
+  SafetyStateReport,
+} from '../../domain/safety-state.js';
 import type {
   EncounterSample,
   EncounterSink,
 } from '../../modules/encounters/encounter.js';
 import type { SafetyStateSink } from '../../modules/vessel-states/safety-state.sink.js';
 
-/** Records the detectors' state reports (unit tests). */
+/** Records the detectors' state reports and collision resets (unit tests). */
 export class RecordingStateSink implements SafetyStateSink {
   readonly reports: SafetyStateReport[] = [];
+  readonly resets: CollisionReset[] = [];
 
   report(report: SafetyStateReport): void {
     this.reports.push(report);
+  }
+
+  resetCollision(reset: CollisionReset): void {
+    this.resets.push(reset);
   }
 
   /** The latest report of a vessel. */

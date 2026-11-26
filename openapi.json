@@ -172,6 +172,63 @@
         ]
       }
     },
+    "/api/v2/safety/stats": {
+      "get": {
+        "description": "Counts for dashboards, taken in the database instead of listing the states: among the vessels `GET /safety/vessels` would list for `bbox` and `since` (a position at or after `since`, default 24 h ago), without its `limit`, the vessels whose latest EWS status is danger (`0`) or warning (`1`) and those whose latest collision risk is `high` or `medium` (the bands that raise alerts). A vessel counts in both groups when both apply. Shared across tenants like the states (spec §8.5): every reader gets the same counts, also for a vessel near a pipeline zone private to another organization (only the zone is hidden in the states, never the EWS status). `since` echoes the lower bound applied, `at` is when the counts were taken; each group names its methodology id.",
+        "operationId": "SafetyStatsController_stats",
+        "parameters": [
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84)",
+            "schema": {
+              "example": "112.5,-7.3,113,-6.8",
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "required": false,
+            "in": "query",
+            "description": "Only vessels with a position at or after this time (default: 24 h ago)",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafetyStatsDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Vessels at risk: EWS danger / warning and collision risk high / medium",
+        "tags": [
+          "stats"
+        ],
+        "x-required-permissions": [
+          "safety:read"
+        ]
+      }
+    },
     "/api/v2/safety/events": {
       "get": {
         "description": "Newest first by `time` (when the alert was raised; default range: the last 7 days, at most 366 days). With `status=open` and no `from`, every currently open occurrence is listed however long ago it was raised (`to` applies only when given). Each event carries the fleet identities of its vessels (`vessel`, `relatedVessel`) and, in `data` / `resolution`, the localizable text (`messageKey`, `messageParams`). Tenancy (spec §8.5): authority and super_admin see every event, other roles the events of their organization’s vessels (mmsi or relatedMmsi).",
@@ -558,6 +615,10 @@
       "description": "Latest navigational safety state per vessel (EWS status, collision risk)"
     },
     {
+      "name": "stats",
+      "description": "Counts of the vessels at risk among the safety states (dashboards)"
+    },
+    {
       "name": "events",
       "description": "Detector events (EWS, collision) and their lifecycle"
     },
@@ -940,6 +1001,87 @@
           "methodIds",
           "vessel",
           "updatedAt"
+        ]
+      },
+      "EwsStatsDto": {
+        "type": "object",
+        "properties": {
+          "danger": {
+            "type": "integer",
+            "minimum": 0,
+            "example": 2,
+            "description": "Vessels whose latest EWS status is danger (`0`)"
+          },
+          "warning": {
+            "type": "integer",
+            "minimum": 0,
+            "example": 5,
+            "description": "Vessels whose latest EWS status is warning (`1`)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "ews.pipeline_distance_status",
+            "description": "Methodology catalog id of the EWS status (spec §17)"
+          }
+        },
+        "required": [
+          "danger",
+          "warning",
+          "methodId"
+        ]
+      },
+      "CollisionStatsDto": {
+        "type": "object",
+        "properties": {
+          "high": {
+            "type": "integer",
+            "minimum": 0,
+            "example": 1,
+            "description": "Vessels whose latest collision risk is `high` (critical alerts)"
+          },
+          "medium": {
+            "type": "integer",
+            "minimum": 0,
+            "example": 3,
+            "description": "Vessels whose latest collision risk is `medium` (warning alerts)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "collision.cpa_tcpa",
+            "description": "Methodology catalog id of the risk bands (spec §17)"
+          }
+        },
+        "required": [
+          "high",
+          "medium",
+          "methodId"
+        ]
+      },
+      "SafetyStatsDto": {
+        "type": "object",
+        "properties": {
+          "ews": {
+            "$ref": "#/components/schemas/EwsStatsDto"
+          },
+          "collision": {
+            "$ref": "#/components/schemas/CollisionStatsDto"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Only vessels with a position at or after this time were counted (`since`, default 24 h before `at`)"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the counts were taken"
+          }
+        },
+        "required": [
+          "ews",
+          "collision",
+          "since",
+          "at"
         ]
       },
       "SafetyEventDto": {

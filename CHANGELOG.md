@@ -41,6 +41,14 @@ web app's backend gaps, and the hardening after the 0.1.0 review. **Deploy after
   detector's event clock (the AIS time of its newest evaluation, never later than the request
   time); an encounter followed by a newer one of its pair (a takeover or restart) has ended. The
   cursor keeps the cut-off.
+- REST: `GET /safety/stats?bbox&since` for dashboards (the web app listed
+  `GET /safety/vessels?ewsStatus=0,1&limit=5000` and counted in the browser) →
+  `{ ews: { danger, warning, methodId }, collision: { high, medium, methodId }, since, at }`: the
+  vessels in EWS danger / warning and those with a `high` / `medium` collision risk among the
+  states `GET /safety/vessels` lists for the same window (default 24 h, same validation), without
+  its `limit`. One statement over the existing partial index `vessel_state_at_risk_idx` (no
+  migration); the same counts for every reader with `safety:read`, since the states are shared
+  (spec §8.5). A 0.1.0 replica answers `404` while a rollout is in progress.
 - `DETECTOR_PINNED_TTL_MS` (default 30 000, the kit's): pinned TTL of the exclusive position
   consumer, i.e. the failover time when the active instance dies.
 - Migration `0002_private_pipelines_open_events`: `vessel_state.nearest_pipeline_org_id`
@@ -52,7 +60,13 @@ web app's backend gaps, and the hardening after the 0.1.0 review. **Deploy after
   runner (`test/resolutions.int.test.ts`), active encounters across a takeover and with AIS time
   behind the wall clock (`test/encounters.int.test.ts`), harness tests for resolution events,
   activation and standby, `onRepeated`, texts, CPA positions and active encounters, the sanitized
-  log of a failed projection rebuild.
+  log of a failed projection rebuild; `GET /safety/stats` over seeded states (window, the same
+  counts as the filtered list, the five roles with `safety:read`, validation, the plan on the
+  partial index: `test/stats.int.test.ts`); a pair at risk across a takeover that never reports
+  again (`test/takeover-states.int.test.ts`), the collision resets of the writer and the detector.
+  `test/encounters.int.test.ts` starts from an empty `AIS_POSITION` stream: its new durable
+  replayed the positions of the files that ran before, which moved the global event clocks ahead
+  of its lagging AIS time in some file orders.
 
 ### Changed
 
@@ -114,6 +128,19 @@ web app's backend gaps, and the hardening after the 0.1.0 review. **Deploy after
   sets `resolved_at` only.
 - Encounter pages skipped an active encounter that got a new sample between two page requests
   (keyset on its moving latest sample time).
+- Collision bands outlived a takeover or restart: the new active instance resolved the restored
+  alert of a pair that never reported again (`pair no longer evaluated`) but left the stored band of
+  both vessels (`high` / `medium`, in `GET /safety/vessels`, on `SAFETY` and counted by
+  `GET /safety/stats` for as long as their last position stayed inside `since`). Ending the alert
+  of a pair it does not follow (that resolution, or a restored pair evaluated without risk) now
+  resets the band of each vessel of the pair it follows no other pair of: `SafetyStateSink`
+  `resetCollision` (merged with the vessel's pending report, newest part wins; otherwise one
+  guarded `UPDATE` per batch that leaves a newer stored part alone), published on `SAFETY` like any
+  change.
+- `since` of `GET /safety/vessels` (and `GET /safety/stats`) answered `500 INTERNAL_ERROR` for
+  ISO-8601 forms that `Date` cannot read (week and ordinal dates, the basic format, hour-only or
+  colon-less times, comma fractions, signed years): they are now refused with
+  `400 VALIDATION_FAILED` (`code: 'isIso8601'`) like other malformed values.
 
 ## [0.1.0] - 2026-11-21
 

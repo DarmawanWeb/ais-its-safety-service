@@ -324,6 +324,113 @@ describe('CollisionDetector', () => {
     );
   });
 
+  it('falls back the stored bands of a restored pair it never evaluates again, except for vessels it follows', async () => {
+    const { harness, states } = setup();
+    // The previous active instance raised A–X; X never reports to this one.
+    const X = 525_000_003;
+    const orphan = `collision:${A}:${X}`;
+    harness.services.alerts.restore([
+      {
+        alertId: '0195f3c4-0000-7000-8000-0000000000c3',
+        dedupKey: orphan,
+        type: 'collision',
+        mmsi: A,
+        relatedMmsi: X,
+        zoneId: null,
+        severity: 'critical',
+        publishedSeverity: 'critical',
+        openedAt: after(-660),
+        publishedAt: after(-660),
+        lastSeenAt: after(-600),
+        firstOccurredAt: after(-660),
+        lastOccurredAt: after(-600),
+        detector: 'collision',
+      },
+    ]);
+    await harness.activate();
+    const far = { sog: 8, cog: 0, ...underWay };
+    await harness.position({
+      mmsi: 525_000_099,
+      ...place(50, 50),
+      ...far,
+      time: after(0),
+    });
+    await harness.tick();
+    // Within the window of the active period the pair may still report.
+    expect(harness.resolutions).toEqual([]);
+    expect(states.resets).toEqual([]);
+
+    // A crosses B at medium risk (followed here); X stays silent.
+    await crossing(harness, 2);
+    await harness.tick();
+    expect(harness.resolutions).toEqual([
+      expect.objectContaining({ reason: 'pair no longer evaluated' }),
+    ]);
+    expect(harness.services.alerts.isOpen(orphan)).toBe(false);
+    // A's band is this instance's (medium, reported); X falls back.
+    expect(states.resets).toEqual([{ mmsi: X, evaluatedAt: after(121) }]);
+    expect(states.last(A)?.collision?.collisionRisk).toBe('medium');
+
+    // A later report of X wins over the reset, even with an older AIS time.
+    await harness.position({
+      mmsi: X,
+      ...place(30, 30),
+      ...far,
+      time: after(100),
+    });
+    expect(states.last(X)?.collision).toEqual({
+      collisionRisk: 'none',
+      closestEncounter: null,
+      evaluatedAt: after(121),
+    });
+  });
+
+  it('falls back the neighbour of a restored pair evaluated without risk', async () => {
+    const { harness, states } = setup();
+    harness.services.alerts.restore([
+      {
+        alertId: '0195f3c4-0000-7000-8000-0000000000c4',
+        dedupKey: KEY,
+        type: 'collision',
+        mmsi: A,
+        relatedMmsi: B,
+        zoneId: null,
+        severity: 'warning',
+        publishedSeverity: 'warning',
+        openedAt: after(-90),
+        publishedAt: after(-90),
+        lastSeenAt: after(-30),
+        firstOccurredAt: after(-90),
+        lastOccurredAt: after(-30),
+        detector: 'collision',
+      },
+    ]);
+    await harness.activate();
+    // Diverging: A sails north, B east from 2 nm east of A.
+    await harness.position({
+      mmsi: A,
+      ...place(0, 0),
+      sog: 12,
+      cog: 0,
+      time: after(0),
+      ...underWay,
+    });
+    await harness.position({
+      mmsi: B,
+      ...place(2, 0),
+      sog: 12,
+      cog: 90,
+      time: after(1),
+      ...underWay,
+    });
+    expect(harness.resolutions).toEqual([
+      expect.objectContaining({ reason: 'no collision risk' }),
+    ]);
+    // B, the evaluated vessel, is reported; A, its neighbour, falls back.
+    expect(states.resets).toEqual([{ mmsi: A, evaluatedAt: after(1) }]);
+    expect(states.last(B)?.collision?.collisionRisk).toBe('none');
+  });
+
   it('starts over after a takeover: new encounter, alert kept open without a new publication', async () => {
     const { harness, encounters } = setup();
     await crossing(harness);

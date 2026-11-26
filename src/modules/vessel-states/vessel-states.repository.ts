@@ -1,6 +1,7 @@
 import {
   type CollisionRisk,
   CollisionRiskSchema,
+  EWS_STATUS,
   type EwsStatus,
   EwsStatusSchema,
 } from '@darmawanweb/ais-its-contracts/domain';
@@ -22,11 +23,17 @@ import * as z from 'zod';
 
 import * as schema from '../../db/schema.js';
 import {
+  type CollisionReset,
   hidePipeline,
   type SafetyStateReport,
   safetyStateMethodIds,
 } from '../../domain/safety-state.js';
-import type { VesselStateFilter, VesselStateRecord } from './vessel-state.js';
+import type {
+  AtRiskCounts,
+  VesselStateFilter,
+  VesselStateRecord,
+  VesselStateWindow,
+} from './vessel-state.js';
 
 const { vesselState, vessels, zones } = schema;
 
@@ -65,6 +72,11 @@ const newerPosition = 'EXCLUDED.time > s.time';
 const pick = (column: string, condition: string): string =>
   `${column} = CASE WHEN ${condition} THEN EXCLUDED.${column} ELSE s.${column} END`;
 
+/** What the writes return of a stored row ({@link ReturnedRowSchema}). */
+const RETURNED_COLUMNS = `s.mmsi, s.evaluated_at, s.ews_status, s.pipeline_dist_m, s.nearest_pipeline_zone_id,
+  s.nearest_pipeline_org_id, s.ews_evaluated_at, s.collision_risk, s.closest_encounter, s.collision_evaluated_at,
+  s.published_state`;
+
 /**
  * Batched upsert of detector reports. Each report carries the latest
  * kinematics and optionally the EWS and/or collision part; every part only
@@ -101,9 +113,45 @@ ON CONFLICT (mmsi) DO UPDATE SET
   collision_evaluated_at = GREATEST(s.collision_evaluated_at, EXCLUDED.collision_evaluated_at),
   evaluated_at = GREATEST(s.evaluated_at, EXCLUDED.evaluated_at),
   updated_at = now()
-RETURNING s.mmsi, s.evaluated_at, s.ews_status, s.pipeline_dist_m, s.nearest_pipeline_zone_id,
-  s.nearest_pipeline_org_id, s.ews_evaluated_at, s.collision_risk, s.closest_encounter, s.collision_evaluated_at,
-  s.published_state`;
+RETURNING ${RETURNED_COLUMNS}`;
+
+/**
+ * Batched {@link CollisionReset}s: the collision part falls back to `none`
+ * without a closest encounter where the stored part is not newer than the
+ * reset (the upsert's rule: the newest part wins) and not already `none`.
+ * Only existing rows change (a reset carries no kinematics); the changed
+ * rows are returned like the upsert's, to be published.
+ */
+const RESET_COLLISION_SQL = `
+UPDATE vessel_state AS s SET
+  collision_risk = 'none',
+  closest_encounter = NULL,
+  collision_evaluated_at = r.at,
+  evaluated_at = GREATEST(s.evaluated_at, r.at),
+  updated_at = now()
+FROM unnest($1::integer[], $2::timestamptz[]) AS r(mmsi, at)
+WHERE s.mmsi = r.mmsi
+  AND (s.collision_risk <> 'none' OR s.closest_encounter IS NOT NULL)
+  AND (s.collision_evaluated_at IS NULL OR s.collision_evaluated_at <= r.at)
+RETURNING ${RETURNED_COLUMNS}`;
+
+/** The alerting EWS codes as SQL literals. */
+const DANGER = sql.raw(String(EWS_STATUS.DANGER));
+const WARNING = sql.raw(String(EWS_STATUS.WARNING));
+
+/**
+ * The states `GET /safety/stats` counts: an alerting EWS status (danger,
+ * warning) or collision band (high, medium, the bands that raise alerts).
+ * Literal constants, not bound parameters, so the planner proves the
+ * predicate of the partial index `vessel_state_at_risk_idx`
+ * (`ews_status <> 3 OR collision_risk <> 'none'`, migration 0001) under any
+ * plan: the count reads the few vessels at risk, not every state.
+ */
+const ALERTING = sql`(${vesselState.ewsStatus} IN (${DANGER}, ${WARNING}) OR ${vesselState.collisionRisk} IN ('high', 'medium'))`;
+
+/** `count(*)` of the rows meeting `condition`, as a JS number. */
+const countWhere = (condition: SQL) =>
+  sql<number>`(count(*) FILTER (WHERE ${condition}))::integer`;
 
 /** Records the last published state of each vessel (never moves it back in time). */
 const MARK_PUBLISHED_SQL = `
@@ -151,31 +199,24 @@ export class VesselStatesRepository {
       column((r) => r.collision?.evaluatedAt ?? null),
       column((r) => r.ews?.nearestPipelineOrgId ?? null),
     ]);
-    return result.rows.map((raw) => {
-      const row = ReturnedRowSchema.parse(raw);
-      const published = SafetyVesselStateV1Schema.safeParse(
-        row.published_state,
-      );
-      const state: SafetyVesselStateV1 = {
-        mmsi: row.mmsi,
-        time: row.evaluated_at.toISOString(),
-        ewsStatus: row.ews_status,
-        pipelineDistanceM: row.pipeline_dist_m,
-        nearestPipelineZoneId: row.nearest_pipeline_zone_id,
-        collisionRisk: row.collision_risk,
-        closestEncounter: row.closest_encounter,
-        methodIds: safetyStateMethodIds({
-          ews: row.ews_evaluated_at !== null,
-          collision: row.collision_evaluated_at !== null,
-        }),
-      };
-      return {
-        // SAFETY is shared with every tenant: org-owned pipelines stay private (spec §8.5).
-        state:
-          row.nearest_pipeline_org_id === null ? state : hidePipeline(state),
-        published: published.success ? published.data : null,
-      };
-    });
+    return result.rows.map(storedStateOf);
+  }
+
+  /**
+   * Applies collision resets (one per vessel, see {@link CollisionReset}) and
+   * returns the states they changed with their last publication; a vessel
+   * whose stored collision part is newer, already `none`, or that has no
+   * stored state is left alone.
+   */
+  async resetCollision(
+    resets: readonly CollisionReset[],
+  ): Promise<StoredSafetyState[]> {
+    if (resets.length === 0) return [];
+    const result = await this.pool.query(RESET_COLLISION_SQL, [
+      resets.map((reset) => reset.mmsi),
+      resets.map((reset) => reset.evaluatedAt),
+    ]);
+    return result.rows.map(storedStateOf);
   }
 
   /** Stores the states just published (heartbeat and change detection). */
@@ -190,9 +231,7 @@ export class VesselStatesRepository {
 
   /** Latest states matching `filter`, ordered by MMSI. */
   async list(filter: VesselStateFilter): Promise<VesselStateRecord[]> {
-    const conditions: SQL[] = [gte(vesselState.time, filter.since)];
-    if (filter.bbox !== undefined)
-      conditions.push(geographyIntersectsBBox(vesselState.geom, filter.bbox));
+    const conditions = windowConditions(filter);
     if (filter.ewsStatuses !== undefined)
       conditions.push(inArray(vesselState.ewsStatus, [...filter.ewsStatuses]));
     if (filter.collisionRisks !== undefined)
@@ -204,6 +243,38 @@ export class VesselStatesRepository {
       .orderBy(asc(vesselState.mmsi))
       .limit(filter.limit);
     return rows.map(toRecord);
+  }
+
+  /**
+   * Vessels of `window` per alerting EWS status and collision band, counted
+   * in one statement over the partial index of the states at risk (a vessel
+   * counts in both groups when both apply).
+   */
+  async countAtRisk(window: VesselStateWindow): Promise<AtRiskCounts> {
+    // An aggregate without GROUP BY returns exactly one row.
+    const [row] = await this.countAtRiskQuery(window);
+    return {
+      ews: { danger: row?.ewsDanger ?? 0, warning: row?.ewsWarning ?? 0 },
+      collision: {
+        high: row?.collisionHigh ?? 0,
+        medium: row?.collisionMedium ?? 0,
+      },
+    };
+  }
+
+  /** The statement of {@link countAtRisk} (also checked for its plan by the integration tests). */
+  countAtRiskQuery(window: VesselStateWindow) {
+    return this.db
+      .select({
+        ewsDanger: countWhere(sql`${vesselState.ewsStatus} = ${DANGER}`),
+        ewsWarning: countWhere(sql`${vesselState.ewsStatus} = ${WARNING}`),
+        collisionHigh: countWhere(sql`${vesselState.collisionRisk} = 'high'`),
+        collisionMedium: countWhere(
+          sql`${vesselState.collisionRisk} = 'medium'`,
+        ),
+      })
+      .from(vesselState)
+      .where(and(...windowConditions(window), ALERTING));
   }
 
   /** The state of one vessel. */
@@ -254,6 +325,38 @@ export class VesselStatesRepository {
         .$dynamic()
     );
   }
+}
+
+/** A row returned by a write, as `SAFETY` carries it, with its last publication. */
+function storedStateOf(raw: unknown): StoredSafetyState {
+  const row = ReturnedRowSchema.parse(raw);
+  const published = SafetyVesselStateV1Schema.safeParse(row.published_state);
+  const state: SafetyVesselStateV1 = {
+    mmsi: row.mmsi,
+    time: row.evaluated_at.toISOString(),
+    ewsStatus: row.ews_status,
+    pipelineDistanceM: row.pipeline_dist_m,
+    nearestPipelineZoneId: row.nearest_pipeline_zone_id,
+    collisionRisk: row.collision_risk,
+    closestEncounter: row.closest_encounter,
+    methodIds: safetyStateMethodIds({
+      ews: row.ews_evaluated_at !== null,
+      collision: row.collision_evaluated_at !== null,
+    }),
+  };
+  return {
+    // SAFETY is shared with every tenant: org-owned pipelines stay private (spec §8.5).
+    state: row.nearest_pipeline_org_id === null ? state : hidePipeline(state),
+    published: published.success ? published.data : null,
+  };
+}
+
+/** Conditions of a {@link VesselStateWindow}: the same vessels for the list and the counts. */
+function windowConditions(window: VesselStateWindow): SQL[] {
+  const conditions: SQL[] = [gte(vesselState.time, window.since)];
+  if (window.bbox !== undefined)
+    conditions.push(geographyIntersectsBBox(vesselState.geom, window.bbox));
+  return conditions;
 }
 
 type SelectedState = Awaited<

@@ -12,7 +12,10 @@ import {
 import { SafetyMetrics } from '../../common/safety.metrics.js';
 import type { Config } from '../../config.js';
 import {
+  type CollisionReset,
+  collisionResetPart,
   mergeSafetyReports,
+  newerCollisionPart,
   publicationReason,
   type PublicationReason,
   type SafetyStateReport,
@@ -30,7 +33,7 @@ import {
 /** The repository operations the writer needs. */
 export type SafetyStateStore = Pick<
   VesselStatesRepository,
-  'upsertReports' | 'markPublished'
+  'upsertReports' | 'resetCollision' | 'markPublished'
 >;
 
 /** Vessels written per statement. */
@@ -58,6 +61,14 @@ const RETRY_MAX_MS = 30_000;
  * keeps the reports (newer ones win) and retries with exponential backoff;
  * a failed publication is retried by the vessel's next report.
  *
+ * A collision reset ({@link CollisionReset}: a band no evaluation backs any
+ * more) becomes the collision part of the vessel's pending report, newest
+ * part winning and the later call on a tie; without a pending report it
+ * waits on its own and is written after each round's batch of reports, with
+ * one guarded update per batch that changes only stored rows whose collision
+ * part is not newer, and the changed rows are published like the upserted
+ * ones.
+ *
  * `vessel_state` is a latest-state cache: positions are acknowledged before
  * their state is written, so a crash loses at most the last flush interval,
  * which the vessels' next positions restore.
@@ -68,6 +79,8 @@ export class SafetyStateWriter
 {
   private readonly logger = new Logger(SafetyStateWriter.name);
   private readonly pending = new Map<number, SafetyStateReport>();
+  /** Collision resets of vessels without a pending report. */
+  private readonly resets = new Map<number, CollisionReset>();
   private readonly heartbeatMs: number;
   private readonly flushIntervalMs: number;
   private timer: NodeJS.Timeout | undefined;
@@ -86,20 +99,37 @@ export class SafetyStateWriter
     this.flushIntervalMs = config.SAFETY_STATE_FLUSH_MS;
   }
 
-  /** Queues a report (merged with a pending report of the same vessel). */
+  /** Queues a report (merged with a pending report or collision reset of the same vessel). */
   report(report: SafetyStateReport): void {
+    const reset = this.resets.get(report.mmsi);
+    this.resets.delete(report.mmsi);
+    const incoming = reset === undefined ? report : afterReset(reset, report);
     const queued = this.pending.get(report.mmsi);
     this.pending.set(
       report.mmsi,
-      queued === undefined ? report : mergeSafetyReports(queued, report),
+      queued === undefined ? incoming : mergeSafetyReports(queued, incoming),
     );
-    this.metrics.statesPending.set(this.pending.size);
-    if (this.pending.size >= STATE_BATCH_SIZE) this.kick();
+    this.queued();
   }
 
-  /** Vessels waiting to be written. */
+  /** Queues a collision reset (the collision part of a pending report of the vessel, if any). */
+  resetCollision(reset: CollisionReset): void {
+    const queued = this.pending.get(reset.mmsi);
+    if (queued === undefined) {
+      this.resets.set(
+        reset.mmsi,
+        newerReset(this.resets.get(reset.mmsi), reset),
+      );
+    } else {
+      // The reset is the later call: its part wins a tie.
+      this.pending.set(reset.mmsi, withReset(queued, reset));
+    }
+    this.queued();
+  }
+
+  /** Vessels waiting to be written (reports and collision resets). */
   get pendingCount(): number {
-    return this.pending.size;
+    return this.pending.size + this.resets.size;
   }
 
   onApplicationBootstrap(): void {
@@ -127,8 +157,13 @@ export class SafetyStateWriter
     await this.start();
   }
 
+  private queued(): void {
+    this.metrics.statesPending.set(this.pendingCount);
+    if (this.pendingCount >= STATE_BATCH_SIZE) this.kick();
+  }
+
   private kick(): void {
-    if (this.running !== undefined || this.pending.size === 0) return;
+    if (this.running !== undefined || this.pendingCount === 0) return;
     if (Date.now() < this.retryAt) return;
     void this.start();
   }
@@ -141,34 +176,73 @@ export class SafetyStateWriter
     return this.running;
   }
 
-  /** Writes batches until nothing is pending or a write fails. */
+  /**
+   * Writes batches until nothing is pending or a write fails. Each round
+   * writes a batch of reports, then one of the resets (taken once the
+   * reports are stored, so a steady flow of reports never holds them back).
+   */
   private async drain(): Promise<void> {
-    while (this.pending.size > 0) {
+    while (this.pendingCount > 0) {
       const batch = this.take(STATE_BATCH_SIZE);
-      const stopTimer = this.metrics.stateFlushDuration.startTimer();
-      try {
-        await this.write(batch);
-        this.failures = 0;
-      } catch (error) {
-        this.requeue(batch);
-        this.failures += 1;
-        const delay = Math.min(
-          RETRY_MAX_MS,
-          RETRY_MIN_MS * 2 ** (this.failures - 1),
-        );
-        this.retryAt = Date.now() + delay;
-        this.metrics.stateFlushFailures.inc();
-        // Database errors without bound values (the kit's error hygiene).
-        const err = sanitizeError(error);
-        this.logger.warn({
-          msg: `Writing ${batch.length} vessel state(s) failed (attempt ${this.failures}, retry in ${delay} ms): ${err instanceof Error ? err.message : String(err)}`,
-          err,
-        });
+      if (
+        batch.length > 0 &&
+        !(await this.attempt(
+          batch.length,
+          () => this.store.upsertReports(batch),
+          () => {
+            this.requeue(batch);
+          },
+        ))
+      )
         return;
-      } finally {
-        stopTimer();
-        this.metrics.statesPending.set(this.pending.size);
-      }
+      const resets = this.takeResets(STATE_BATCH_SIZE);
+      if (
+        resets.length > 0 &&
+        !(await this.attempt(
+          resets.length,
+          () => this.store.resetCollision(resets),
+          () => {
+            this.requeueResets(resets);
+          },
+        ))
+      )
+        return;
+    }
+  }
+
+  /**
+   * Writes one batch and publishes its due rows; `false` when the write
+   * failed: the batch is put back and retried after a backoff.
+   */
+  private async attempt(
+    count: number,
+    write: () => Promise<StoredSafetyState[]>,
+    requeue: () => void,
+  ): Promise<boolean> {
+    const stopTimer = this.metrics.stateFlushDuration.startTimer();
+    try {
+      await this.publishStored(await write());
+      this.failures = 0;
+      return true;
+    } catch (error) {
+      requeue();
+      this.failures += 1;
+      const delay = Math.min(
+        RETRY_MAX_MS,
+        RETRY_MIN_MS * 2 ** (this.failures - 1),
+      );
+      this.retryAt = Date.now() + delay;
+      this.metrics.stateFlushFailures.inc();
+      // Database errors without bound values (the kit's error hygiene).
+      const err = sanitizeError(error);
+      this.logger.warn({
+        msg: `Writing ${count} vessel state(s) failed (attempt ${this.failures}, retry in ${delay} ms): ${err instanceof Error ? err.message : String(err)}`,
+        err,
+      });
+      return false;
+    } finally {
+      stopTimer();
+      this.metrics.statesPending.set(this.pendingCount);
     }
   }
 
@@ -182,19 +256,51 @@ export class SafetyStateWriter
     return batch;
   }
 
-  /** Puts a failed batch back; reports queued meanwhile are newer and win. */
+  private takeResets(limit: number): CollisionReset[] {
+    const batch: CollisionReset[] = [];
+    for (const [mmsi, reset] of this.resets) {
+      if (batch.length >= limit) break;
+      batch.push(reset);
+      this.resets.delete(mmsi);
+    }
+    return batch;
+  }
+
+  /** Puts a failed batch back; reports and resets queued meanwhile are newer and win. */
   private requeue(batch: readonly SafetyStateReport[]): void {
     for (const report of batch) {
       const newer = this.pending.get(report.mmsi);
+      const reset = this.resets.get(report.mmsi);
+      this.resets.delete(report.mmsi);
+      const merged =
+        newer === undefined ? report : mergeSafetyReports(report, newer);
       this.pending.set(
         report.mmsi,
-        newer === undefined ? report : mergeSafetyReports(report, newer),
+        reset === undefined ? merged : withReset(merged, reset),
       );
     }
   }
 
-  private async write(batch: readonly SafetyStateReport[]): Promise<void> {
-    const stored = await this.store.upsertReports(batch);
+  /** Puts failed resets back; reports and resets queued meanwhile are newer and win. */
+  private requeueResets(batch: readonly CollisionReset[]): void {
+    for (const reset of batch) {
+      const queued = this.pending.get(reset.mmsi);
+      if (queued === undefined) {
+        const later = this.resets.get(reset.mmsi);
+        this.resets.set(
+          reset.mmsi,
+          later === undefined ? reset : newerReset(reset, later),
+        );
+      } else {
+        this.pending.set(reset.mmsi, afterReset(reset, queued));
+      }
+    }
+  }
+
+  /** Publishes the written rows that are due and records their publication. */
+  private async publishStored(
+    stored: readonly StoredSafetyState[],
+  ): Promise<void> {
     const due = stored.flatMap((row) => this.due(row));
     const published = await this.publishAll(due);
     await this.store.markPublished(published);
@@ -237,4 +343,37 @@ export class SafetyStateWriter
     }
     return published;
   }
+}
+
+/** `report` with `reset` as its later collision part (the newest part wins, the reset on a tie). */
+function withReset(
+  report: SafetyStateReport,
+  reset: CollisionReset,
+): SafetyStateReport {
+  return {
+    ...report,
+    collision: newerCollisionPart(report.collision, collisionResetPart(reset)),
+  };
+}
+
+/** `report` after `reset` (the newest collision part wins, the report's on a tie). */
+function afterReset(
+  reset: CollisionReset,
+  report: SafetyStateReport,
+): SafetyStateReport {
+  return {
+    ...report,
+    collision: newerCollisionPart(collisionResetPart(reset), report.collision),
+  };
+}
+
+/** The newer of two resets of one vessel (`later` on a tie). */
+function newerReset(
+  earlier: CollisionReset | undefined,
+  later: CollisionReset,
+): CollisionReset {
+  return earlier !== undefined &&
+    earlier.evaluatedAt.getTime() > later.evaluatedAt.getTime()
+    ? earlier
+    : later;
 }

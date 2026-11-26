@@ -6,7 +6,7 @@ import {
   VesselStateStore,
 } from '@darmawanweb/ais-its-nest/analytics';
 import { type Database, DRIZZLE_DB } from '@darmawanweb/ais-its-nest/db';
-import { EventPublisher } from '@darmawanweb/ais-its-nest/nats';
+import { EventPublisher, NatsClient } from '@darmawanweb/ais-its-nest/nats';
 import { uniqueName, waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -126,6 +126,15 @@ describe('active encounters: per pair, in event time (GET /safety/encounters?act
     );
 
   beforeAll(async () => {
+    // Both clocks are global (the detector's newest position time, the newest
+    // collision evaluation of any vessel) and a new durable replays the whole
+    // AIS_POSITION stream: the positions of the files that ran before, near the
+    // wall clock, would move them ahead of this file's lagging AIS time (and
+    // the detector would close this file's pairs as stale). Start from an
+    // empty stream, whatever the file order.
+    const purger = await startTestService();
+    await purger.app.get(NatsClient).manager.streams.purge('AIS_POSITION');
+    await purger.app.close();
     a = await startTestService({ durablePrefix, env });
   });
 

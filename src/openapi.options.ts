@@ -14,6 +14,11 @@ export const OPENAPI: OpenApiOptions = {
         'Latest navigational safety state per vessel (EWS status, collision risk)',
     },
     {
+      name: 'stats',
+      description:
+        'Counts of the vessels at risk among the safety states (dashboards)',
+    },
+    {
       name: 'events',
       description: 'Detector events (EWS, collision) and their lifecycle',
     },
